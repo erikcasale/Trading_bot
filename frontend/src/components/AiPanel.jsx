@@ -9,7 +9,7 @@ const BIAS = {
   neutral: { label: "Neutrale", color: "#94A3B8", Icon: Target },
 };
 
-export default function AiPanel({ symbol, timeframe = "M15" }) {
+export default function AiPanel({ symbol, timeframe = "M15", onAnalysis }) {
   const [loading, setLoading] = useState(false);
   const [res, setRes] = useState(null);
 
@@ -18,6 +18,7 @@ export default function AiPanel({ symbol, timeframe = "M15" }) {
     try {
       const { data } = await api.post("/ai/analysis", { symbol, timeframe });
       setRes(data);
+      onAnalysis && onAnalysis(data);
       toast.success("Analisi Smart Money generata");
     } catch (e) {
       toast.error("Errore durante l'analisi AI");

@@ -13,6 +13,11 @@ export default function Dashboard() {
   const [bot, setBot] = useState(null);
   const [account, setAccount] = useState(null);
   const [posKey, setPosKey] = useState(0);
+  const [setup, setSetup] = useState(null);
+
+  const selectSymbol = (s) => { setSymbol(s); setSetup(null); };
+  const handleAnalysis = (d) =>
+    setSetup(d?.analysis?.setup ? { ...d.analysis.setup, symbol: d.symbol } : null);
 
   const loadBot = useCallback(() => {
     api.get("/bot").then((r) => { setBot(r.data.bot); setAccount(r.data.account); }).catch(() => {});
@@ -37,16 +42,16 @@ export default function Dashboard() {
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 md:gap-4">
           <div className="lg:col-span-3 xl:col-span-2">
-            <Watchlist selected={symbol} onSelect={setSymbol} />
+            <Watchlist selected={symbol} onSelect={selectSymbol} />
           </div>
 
           <div className="lg:col-span-6 xl:col-span-7 space-y-4">
-            <CandleChart symbol={symbol} />
+            <CandleChart symbol={symbol} setup={setup} />
             <BacktestPanel symbol={symbol} />
           </div>
 
           <div className="lg:col-span-3 space-y-4">
-            <AiPanel symbol={symbol} />
+            <AiPanel symbol={symbol} onAnalysis={handleAnalysis} />
             <BotPanel bot={bot} onRefresh={loadBot} />
           </div>
 

@@ -4,7 +4,7 @@ import { Loader2 } from "lucide-react";
 
 const TIMEFRAMES = ["M1", "M5", "M15", "H1", "H4", "D1"];
 
-export default function CandleChart({ symbol }) {
+export default function CandleChart({ symbol, setup }) {
   const [tf, setTf] = useState("M15");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -32,6 +32,8 @@ export default function CandleChart({ symbol }) {
     return () => { alive = false; clearInterval(t); };
   }, [symbol, tf]);
 
+  const activeSetup = setup && setup.symbol === symbol ? setup : null;
+
   const geo = useMemo(() => {
     if (!data) return null;
     const c = data.candles;
@@ -42,11 +44,15 @@ export default function CandleChart({ symbol }) {
       min = Math.min(min, data.zones.liquidity.sell_side);
       max = Math.max(max, data.zones.liquidity.buy_side);
     }
+    if (activeSetup) {
+      [activeSetup.entry, activeSetup.sl, activeSetup.tp1, activeSetup.tp2, activeSetup.tp3]
+        .filter((v) => typeof v === "number").forEach((v) => { min = Math.min(min, v); max = Math.max(max, v); });
+    }
     const range = max - min || 1;
     const y = (p) => pad + (max - p) / range * (H - pad * 2);
     const x = (i) => i * 9 + 4;
     return { c, W, H, y, x, min, max, range };
-  }, [data]);
+  }, [data, activeSetup]);
 
   const dig = data?.digits ?? 2;
 
@@ -138,10 +144,40 @@ export default function CandleChart({ symbol }) {
               {/* current price line */}
               <line x1="0" x2={geo.W} y1={geo.y(data.price)} y2={geo.y(data.price)}
                 stroke="#F8FAFC" strokeWidth="0.5" strokeDasharray="2 3" opacity="0.4" />
+
+              {/* AI trade setup levels */}
+              {activeSetup && [
+                { p: activeSetup.entry, c: "#F8FAFC", label: "ENTRY" },
+                { p: activeSetup.sl, c: "#EF4444", label: "SL" },
+                { p: activeSetup.tp1, c: "#10B981", label: "TP1" },
+                { p: activeSetup.tp2, c: "#10B981", label: "TP2" },
+                { p: activeSetup.tp3, c: "#10B981", label: "TP3" },
+              ].filter((l) => typeof l.p === "number").map((l, i) => (
+                <line key={`lvl${i}`} x1="0" x2={geo.W} y1={geo.y(l.p)} y2={geo.y(l.p)}
+                  stroke={l.c} strokeWidth="1" strokeDasharray="6 3" opacity="0.9" />
+              ))}
             </svg>
           </div>
         )}
       </div>
+
+      {activeSetup && (
+        <div data-testid="chart-setup-legend" className="flex flex-wrap items-center gap-2 mt-2">
+          <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+            activeSetup.direction === "BUY" ? "bg-[#10B981]/15 text-up" : "bg-[#EF4444]/15 text-down"}`}>
+            {activeSetup.direction}
+          </span>
+          {[["ENTRY", activeSetup.entry, "#F8FAFC"], ["SL", activeSetup.sl, "#EF4444"],
+            ["TP1", activeSetup.tp1, "#10B981"], ["TP2", activeSetup.tp2, "#10B981"], ["TP3", activeSetup.tp3, "#10B981"]]
+            .map(([lbl, val, col]) => (
+              <span key={lbl} className="flex items-center gap-1 text-[10px] font-mono">
+                <span className="w-3 h-0.5 rounded" style={{ background: col }} />
+                <span className="text-[#64748B]">{lbl}</span>
+                <span style={{ color: col }}>{val}</span>
+              </span>
+            ))}
+        </div>
+      )}
 
       <div className="flex items-center justify-between mt-2 text-[10px] font-mono text-[#64748B]">
         <span>Max {data ? geo?.max?.toFixed(dig) : "—"}</span>
