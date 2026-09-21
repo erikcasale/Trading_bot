@@ -1,0 +1,31 @@
+{
+  "summary": "Tested new Forward-Test walk-forward engine + MetaApi datasource integration on Apex Flow. 8/8 backend pytest cases pass (datasource/status, forward-test EUR/USD & multi-symbol BTC/USDT + XAU/USD + US30, invalid symbol 404, execute-live disconnected safety, invalid symbol for execute-live). Frontend: demo login works, Forward-Test panel renders full-width, source badge, run button starts replay, live stats (winrate, PnL, equity, trade log), pause/resume/speed 1x/3x/6x/skip all work. AI analysis, backtest, watchlist, positions and existing dashboard features regress-clean.\n\nIMPORTANT DEVIATION FROM REQUEST: The request stated broker is DISCONNECTED and expected source='simulated' + badge 'DATI SIMULATI'. Reality at test time: GET /api/datasource/status returns connected=true, connection_status='CONNECTED' (Tickmill broker IS live), so /forwardtest/run for EUR/USD, XAU/USD, US30 returns source='real' and the UI shows 'TICKMILL CONNESSO' / 'DATI REALI TICKMILL'. Only BTC/USDT falls back to 'simulated' (Tickmill likely lacks that symbol). The graceful-fallback code path is exercised for BTC/USDT and works correctly. execute-live still returns ok=false with error (broker connected but order rejected — expected in DEMO env). Nothing crashes.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_forwardtest.py",
+    "/app/test_reports/pytest/pytest_forwardtest.xml"
+  ],
+  "action_items": [
+    "INFO ONLY (not a bug): Broker is now actually CONNECTED. The request expected disconnected/simulated state but MetaApi provisioning API returns CONNECTED for account 85584886-eac6-441c-9641-7e8dff74426a. UI/labels correctly reflect this ('DATI REALI TICKMILL' / 'TICKMILL CONNESSO'). If the user still expects the simulated fallback to be visually demonstrated, they can force it by temporarily unsetting METAAPI_TOKEN or picking a symbol Tickmill doesn't have (e.g. BTC/USDT already falls back).",
+    "OBSERVATION: On real Tickmill EUR/USD M15 candles, the walk-forward engine produced 0 trades (winrate stayed 0% even after skip-to-end). The SMC entry rules (order block retest within 0.1% of top/bottom) may be too tight for real market prices. Backend tests still pass because they only require total_trades >= 0. Consider loosening tolerance or extending the fallback FVG retest window if real-data trade generation is desired."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 710 lines — crossed the 700-line threshold. Recommend splitting into routers (auth.py, market.py, ai.py, bot.py, positions.py, backtest.py, forwardtest.py).",
+    "metaapi_service._state is a module-level mutable dict — fine for single-worker uvicorn but would break under multiple workers/replicas. Not a concern in current supervisor setup.",
+    "run_forward_test recomputes smart_money_zones on every bar (O(n*warmup)) — for bars=600 this is ~27k swing-point scans. Acceptable for demo but could be memoized/incremental.",
+    "In ForwardTest.jsx, res.equity_curve[idx] is accessed without bounds check when idx > len — safe today because setIdx clamps, but a defensive `res.equity_curve[Math.min(idx, res.equity_curve.length-1)] ?? 0` would be safer."
+  ],
+  "updated_files": ["/app/backend/tests/test_forwardtest.py"],
+  "success_rate": {"backend": "100% (8/8 new + 24/24 existing from iter1)", "frontend": "100% of critical flows"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None — reused iteration_1 seed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Broker connection state is dynamic; do not hard-assert connected=false. Use `assert d['source'] in ('simulated','real')` and check field presence. BTC/USDT reliably returns 'simulated' (Tickmill missing symbol) so it's a good test-case for exercising the fallback path. Backend tests in /app/backend/tests/test_forwardtest.py are the new regression suite for this feature; run with `pytest backend/tests/test_forwardtest.py`.",
+  "rca of the issue": "N/A — no functional bugs. The only 'unexpected' observation (broker connected instead of disconnected) is an external state change on the user's side, not an app bug."
+}

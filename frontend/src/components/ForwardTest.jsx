@@ -2,13 +2,28 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { LineChart, Line, YAxis, ResponsiveContainer, Tooltip } from "recharts";
-import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers } from "lucide-react";
+import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle } from "lucide-react";
 
-const TIMEFRAMES = ["M5", "M15", "H1", "H4"];
+const PERIODS = [
+  ["Settimana", "M15", 480],
+  ["Mese", "H1", 500],
+  ["Trimestre", "H4", 540],
+  ["Anno", "D1", 365],
+];
 const SPEEDS = [["1×", 1], ["3×", 3], ["6×", 6]];
 
+const fmtDate = (iso, withTime = true) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso).slice(0, 16);
+  const p = (n) => String(n).padStart(2, "0");
+  const base = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return withTime ? `${base} ${p(d.getHours())}:${p(d.getMinutes())}` : base;
+};
+
 export default function ForwardTest({ symbol }) {
-  const [tf, setTf] = useState("M15");
+  const [period, setPeriod] = useState("Trimestre");
+  const [mode, setMode] = useState("highwinrate");
   const [loading, setLoading] = useState(false);
   const [res, setRes] = useState(null);
   const [idx, setIdx] = useState(0);
@@ -17,20 +32,18 @@ export default function ForwardTest({ symbol }) {
   const [ds, setDs] = useState(null);
   const timer = useRef(null);
 
-  useEffect(() => {
-    api.get("/datasource/status").then((r) => setDs(r.data)).catch(() => {});
-  }, []);
-
+  useEffect(() => { api.get("/datasource/status").then((r) => setDs(r.data)).catch(() => {}); }, []);
   useEffect(() => { setRes(null); setPlaying(false); setIdx(0); }, [symbol]);
 
   const run = async () => {
     setLoading(true); setPlaying(false);
+    const [, tf, bars] = PERIODS.find((p) => p[0] === period);
     try {
-      const { data } = await api.post("/forwardtest/run", { symbol, timeframe: tf, bars: 320 });
+      const { data } = await api.post("/forwardtest/run", { symbol, timeframe: tf, bars, mode });
       setRes(data);
       setIdx(data.warmup || 45);
       setPlaying(true);
-      toast.success(`Forward-test avviato · dati ${data.source === "real" ? "REALI" : "simulati"}`);
+      toast.success(`Forward-test ${period} · dati ${data.source === "real" ? "REALI" : "simulati"}`);
     } catch { toast.error("Errore avvio forward-test"); }
     finally { setLoading(false); }
   };
@@ -50,7 +63,7 @@ export default function ForwardTest({ symbol }) {
   const geo = useMemo(() => {
     if (!res) return null;
     const c = res.candles;
-    const step = Math.max(4, Math.floor(1100 / c.length));
+    const step = Math.max(3, Math.floor(1100 / c.length));
     const W = c.length * step, H = 300, pad = 10;
     let min = Math.min(...c.map((x) => x.l)), max = Math.max(...c.map((x) => x.h));
     res.trades.forEach((t) => { [t.sl, t.tp, t.entry].forEach((v) => { min = Math.min(min, v); max = Math.max(max, v); }); });
@@ -60,16 +73,18 @@ export default function ForwardTest({ symbol }) {
     return { c, W, H, y, x, step, min, max };
   }, [res]);
 
-  const closed = res ? res.trades.filter((t) => t.exit_index <= idx) : [];
-  const openT = res ? res.trades.find((t) => t.entry_index <= idx && t.exit_index > idx) : null;
+  const clampIdx = res ? Math.min(idx, res.candles.length - 1) : 0;
+  const closed = res ? res.trades.filter((t) => t.exit_index <= clampIdx && t.result !== "open") : [];
+  const openT = res ? res.trades.find((t) => t.entry_index <= clampIdx && t.exit_index > clampIdx) : null;
   const wins = closed.filter((t) => t.result === "win").length;
   const wr = closed.length ? Math.round(wins / closed.length * 100) : 0;
-  const equity = res ? res.equity_curve[idx] : 0;
+  const equity = res ? (res.equity_curve[clampIdx] ?? res.start_equity) : 0;
   const pnl = res ? +(equity - res.start_equity).toFixed(2) : 0;
-  const eqData = res ? res.equity_curve.slice(0, idx + 1).map((e, i) => ({ i, e })) : [];
-  const progress = res ? Math.round((idx / (res.candles.length - 1)) * 100) : 0;
+  const eqData = res ? res.equity_curve.slice(0, clampIdx + 1).map((e, i) => ({ i, e })) : [];
+  const progress = res ? Math.round((clampIdx / (res.candles.length - 1)) * 100) : 0;
   const dig = res?.digits ?? 2;
   const real = res?.source === "real";
+  const profitable = res ? res.profit_factor >= 1 : false;
 
   return (
     <div data-testid="forward-test-panel" className="card p-4">
@@ -79,25 +94,34 @@ export default function ForwardTest({ symbol }) {
           <span className="font-head font-bold text-sm">Forward Test · Walk-Forward</span>
           <span className="overline hidden sm:inline">{symbol}</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span data-testid="forwardtest-source-badge"
-            className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] font-mono font-bold border ${
-              real ? "border-[#10B981]/50 bg-[#10B981]/10 text-[#10B981]"
-                   : "border-[#F59E0B]/50 bg-[#F59E0B]/10 text-[#F59E0B]"}`}>
-            <Database className="w-3 h-3" />
-            {res ? (real ? "DATI REALI TICKMILL" : "DATI SIMULATI") :
-              ds?.connected ? "TICKMILL CONNESSO" : "TICKMILL: non connesso"}
-          </span>
-        </div>
+        <span data-testid="forwardtest-source-badge"
+          className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] font-mono font-bold border ${
+            real ? "border-[#10B981]/50 bg-[#10B981]/10 text-[#10B981]"
+                 : "border-[#F59E0B]/50 bg-[#F59E0B]/10 text-[#F59E0B]"}`}>
+          <Database className="w-3 h-3" />
+          {res ? (real ? "DATI REALI TICKMILL" : "DATI SIMULATI") :
+            ds?.connected ? "TICKMILL CONNESSO" : "TICKMILL: non connesso"}
+        </span>
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mb-3">
+        {/* periodo */}
         <div className="flex items-center gap-1 p-0.5 rounded-lg bg-[#0B0E17] border border-[#1E293B]">
-          {TIMEFRAMES.map((t) => (
-            <button key={t} data-testid={`forwardtest-tf-${t}`} onClick={() => setTf(t)}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-semibold transition-colors ${
-                tf === t ? "bg-[#1A2332] text-[#0EA5E9]" : "text-[#64748B] hover:text-[#94A3B8]"}`}>
-              {t}
+          {PERIODS.map(([label]) => (
+            <button key={label} data-testid={`forwardtest-period-${label}`} onClick={() => setPeriod(label)}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                period === label ? "bg-[#1A2332] text-[#0EA5E9]" : "text-[#64748B] hover:text-[#94A3B8]"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {/* modalità */}
+        <div className="flex items-center gap-1 p-0.5 rounded-lg bg-[#0B0E17] border border-[#1E293B]">
+          {[["highwinrate", "Alto Winrate"], ["balanced", "Bilanciato"], ["nosl", "Senza SL"]].map(([m, l]) => (
+            <button key={m} data-testid={`forwardtest-mode-${m}`} onClick={() => setMode(m)}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                mode === m ? "bg-[#1A2332] text-[#8B5CF6]" : "text-[#64748B] hover:text-[#94A3B8]"}`}>
+              {l}
             </button>
           ))}
         </div>
@@ -133,24 +157,70 @@ export default function ForwardTest({ symbol }) {
       </div>
 
       {!res ? (
-        <div className="h-[300px] flex flex-col items-center justify-center text-center text-[#64748B] border border-dashed border-[#1E293B] rounded-lg">
+        <div className="h-[280px] flex flex-col items-center justify-center text-center text-[#64748B] border border-dashed border-[#1E293B] rounded-lg">
           <Radio className="w-8 h-8 mb-2 opacity-50" />
           <p className="text-xs max-w-md leading-relaxed">
-            Il walk-forward "riproduce" le candele una alla volta come fosse tempo reale, applicando la logica
-            Smart Money (ingresso su order block/FVG, SL sullo swing, TP verso la liquidità) e mostrando equity e
-            trade live. {ds && !ds.connected && <span className="text-[#F59E0B]">Broker non ancora connesso → useremo dati simulati.</span>}
+            Riproduce le candele una alla volta come fosse tempo reale. Scegli il <b className="text-[#94A3B8]">periodo</b> (fino a
+            "Anno" su candele giornaliere) e la <b className="text-[#94A3B8]">modalità</b>, poi avvia: vedrai equity, trade con
+            date e statistiche live. {ds && !ds.connected && <span className="text-[#F59E0B]">Broker non connesso → dati simulati.</span>}
           </p>
         </div>
       ) : (
         <div className="space-y-3 fade-up">
-          {/* live stats */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-            <Stat testid="forwardtest-winrate" icon={Percent} label="Win Rate" value={`${wr}%`} color="#10B981" />
-            <Stat icon={Layers} label="Trade Chiusi" value={`${closed.length}/${res.total_trades}`} color="#94A3B8" />
-            <Stat icon={TrendingUp} label="PnL Corrente" value={`${pnl >= 0 ? "+" : ""}€${pnl}`} color={pnl >= 0 ? "#10B981" : "#EF4444"} />
-            <Stat icon={Activity} label="Equity" value={`€${equity.toLocaleString("it-IT")}`} color="#0EA5E9" />
-            <Stat icon={Activity} label="Max DD" value={`-${res.max_drawdown}%`} color="#EF4444" />
+          {/* date range */}
+          <div className="flex items-center gap-2 text-[11px] font-mono text-[#94A3B8]">
+            <CalendarRange className="w-3.5 h-3.5 text-[#0EA5E9]" />
+            Periodo testato: <b className="text-white">{fmtDate(res.period_start, false)}</b> → <b className="text-white">{fmtDate(res.period_end, false)}</b>
+            <span className="text-[#64748B]">· {res.candles.length} candele {res.timeframe}</span>
           </div>
+
+          {/* live stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+            <Stat testid="forwardtest-winrate" icon={Percent} label="Win Rate" value={`${wr}%`} color="#10B981" />
+            <Stat icon={Layers} label="Trade" value={`${closed.length}/${res.total_trades}`} color="#94A3B8" />
+            <Stat icon={TrendingUp} label="PnL" value={`${pnl >= 0 ? "+" : ""}€${pnl}`} color={pnl >= 0 ? "#10B981" : "#EF4444"} />
+            <Stat icon={Activity} label="Profit Factor" value={res.profit_factor} color={profitable ? "#10B981" : "#EF4444"} />
+            <Stat icon={Activity} label="Max DD" value={`-${res.max_drawdown}%`} color="#EF4444" />
+            <Stat icon={TrendingUp} label="Media W/L" value={`${res.avg_win}/${res.avg_loss}`} color="#F59E0B" />
+          </div>
+
+          {/* honesty note for high-winrate mode */}
+          {mode === "highwinrate" && (
+            <div className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/5 border border-[#F59E0B]/30 rounded-lg p-2.5 leading-relaxed">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                Modalità <b>Alto Winrate</b>: tante piccole vincite (media €{res.avg_win}) ma la rara perdita è grande
+                (media €{res.avg_loss}). Il winrate è alto <b>e reale</b>, ma {profitable
+                  ? "il profit factor > 1 su questo periodo — le performance passate NON garantiscono quelle future."
+                  : <span>con profit factor {res.profit_factor} <b>NON è profittevole</b> su questo periodo: winrate alto ≠ guadagno. È esattamente la trappola del "98% winrate".</span>}
+              </span>
+            </div>
+          )}
+
+          {/* reality check for NO-STOP-LOSS mode */}
+          {mode === "nosl" && (
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <Stat icon={Activity} label="Equity REALE" value={`€${res.true_equity.toLocaleString("it-IT")}`}
+                  color={res.true_equity >= res.start_equity ? "#10B981" : "#EF4444"} />
+                <Stat icon={AlertTriangle} label="Flottante Aperto" value={`€${res.open_floating}`}
+                  color={res.open_floating >= 0 ? "#10B981" : "#EF4444"} />
+                <Stat icon={Layers} label="Trade Aperti" value={res.open_trades} color="#F59E0B" />
+                <Stat icon={AlertTriangle} label="Peggior Flottante" value={`€${res.worst_floating}`} color="#EF4444" />
+              </div>
+              <div className="flex items-start gap-2 text-[11px] text-[#EF4444] bg-[#EF4444]/8 border border-[#EF4444]/40 rounded-lg p-2.5 leading-relaxed">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>
+                  <b>SENZA STOP LOSS — l'illusione del 100%.</b> Il winrate sui trade <i>chiusi</i> è {wr}%, ma il conto
+                  reale (mark-to-market) vale <b>€{res.true_equity.toLocaleString("it-IT")}</b>
+                  {res.true_equity < res.start_equity
+                    ? <span> cioè <b>{(((res.true_equity - res.start_equity) / res.start_equity) * 100).toFixed(1)}%</b> — il trade rimasto aperto è a €{res.open_floating} e continua a perdere.</span>
+                    : " ma un solo movimento contrario prolungato azzererebbe tutto."}
+                  {" "}Con la leva, una perdita flottante di €{res.worst_floating} <b>brucia il conto</b>. Ecco perché togliere lo SL non fa guadagnare: nasconde il rischio finché non ti distrugge.
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* replay chart */}
           <div className="rounded-lg bg-[#0B0E17] border border-[#1E293B] overflow-hidden">
@@ -159,7 +229,7 @@ export default function ForwardTest({ symbol }) {
                 {openT && [["#F8FAFC", openT.entry], ["#EF4444", openT.sl], ["#10B981", openT.tp]].map(([c, p], k) => (
                   <line key={k} x1="0" x2={geo.W} y1={geo.y(p)} y2={geo.y(p)} stroke={c} strokeWidth="0.8" strokeDasharray="5 4" opacity="0.85" />
                 ))}
-                {geo.c.slice(0, idx + 1).map((k, i) => {
+                {geo.c.slice(0, clampIdx + 1).map((k, i) => {
                   const up = k.c >= k.o;
                   const col = up ? "#10B981" : "#EF4444";
                   const bt = geo.y(Math.max(k.o, k.c));
@@ -167,62 +237,93 @@ export default function ForwardTest({ symbol }) {
                   return (
                     <g key={i}>
                       <line x1={geo.x(i)} x2={geo.x(i)} y1={geo.y(k.h)} y2={geo.y(k.l)} stroke={col} strokeWidth="0.7" />
-                      <rect x={geo.x(i) - geo.step / 2 + 0.5} y={bt} width={Math.max(1.5, geo.step - 1)} height={bh} fill={col} />
+                      <rect x={geo.x(i) - geo.step / 2 + 0.4} y={bt} width={Math.max(1.2, geo.step - 0.8)} height={bh} fill={col} />
                     </g>
                   );
                 })}
-                {/* entry/exit markers for revealed trades */}
-                {res.trades.filter((t) => t.entry_index <= idx).map((t, k) => (
+                {res.trades.filter((t) => t.entry_index <= clampIdx).map((t, k) => (
                   <g key={`m${k}`}>
-                    <circle cx={geo.x(t.entry_index)} cy={geo.y(t.entry)} r="3"
+                    <circle cx={geo.x(t.entry_index)} cy={geo.y(t.entry)} r="2.6"
                       fill={t.side === "BUY" ? "#0EA5E9" : "#F59E0B"} stroke="#0B0E17" strokeWidth="1" />
-                    {t.exit_index <= idx && (
-                      <circle cx={geo.x(t.exit_index)} cy={geo.y(t.exit)} r="3"
+                    {t.exit_index <= clampIdx && (
+                      <circle cx={geo.x(t.exit_index)} cy={geo.y(t.exit)} r="2.6"
                         fill={t.result === "win" ? "#10B981" : "#EF4444"} stroke="#0B0E17" strokeWidth="1" />
                     )}
                   </g>
                 ))}
               </svg>
             </div>
-            {/* progress bar */}
             <div className="h-1 bg-[#131A24]">
               <div className="h-full bg-[#0EA5E9] transition-all" style={{ width: `${progress}%` }} />
             </div>
           </div>
 
-          {/* equity + log */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-            <div data-testid="forwardtest-equity-chart" className="lg:col-span-2 rounded-lg border border-[#1E293B] bg-[#0B0E17] p-2">
-              <div className="overline mb-1 px-1">Equity Curve (live)</div>
-              <ResponsiveContainer width="100%" height={140}>
-                <LineChart data={eqData} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
-                  <YAxis domain={["dataMin", "dataMax"]} tick={{ fill: "#64748B", fontSize: 10 }} axisLine={false} tickLine={false}
-                    width={52} tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} />
-                  <Tooltip contentStyle={{ background: "#131A24", border: "1px solid #334155", borderRadius: 8, fontSize: 12 }}
-                    labelStyle={{ display: "none" }} formatter={(v) => [`€${v.toLocaleString("it-IT")}`, "Equity"]} />
-                  <Line type="monotone" dataKey="e" stroke={pnl >= 0 ? "#10B981" : "#EF4444"} strokeWidth={2} dot={false} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
+          {/* equity */}
+          <div data-testid="forwardtest-equity-chart" className="rounded-lg border border-[#1E293B] bg-[#0B0E17] p-2">
+            <div className="overline mb-1 px-1">Equity Curve (live)</div>
+            <ResponsiveContainer width="100%" height={130}>
+              <LineChart data={eqData} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                <YAxis domain={["dataMin", "dataMax"]} tick={{ fill: "#64748B", fontSize: 10 }} axisLine={false} tickLine={false}
+                  width={56} tickFormatter={(v) => `€${(v / 1000).toFixed(2)}k`} />
+                <Tooltip contentStyle={{ background: "#131A24", border: "1px solid #334155", borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ display: "none" }} formatter={(v) => [`€${v.toLocaleString("it-IT")}`, "Equity"]} />
+                <Line type="monotone" dataKey="e" stroke={pnl >= 0 ? "#10B981" : "#EF4444"} strokeWidth={2} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* full trades table for manual verification */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="overline">Registro Operazioni · verifica manuale ({res.trades.length})</span>
+              <span className="text-[10px] font-mono text-[#64748B]">date ora broker (UTC+offset MT5)</span>
             </div>
-            <div className="rounded-lg border border-[#1E293B] bg-[#0B0E17] p-2">
-              <div className="overline mb-1 px-1">Trade Log</div>
-              <div className="space-y-1 max-h-[120px] overflow-y-auto pr-1">
-                {closed.length === 0 && <div className="text-[11px] text-[#64748B] px-1 py-2">Nessun trade chiuso ancora...</div>}
-                {closed.slice().reverse().map((t, k) => (
-                  <div key={k} className="flex items-center justify-between text-[11px] font-mono px-2 py-1 rounded bg-[#131A24]">
-                    <span className={t.side === "BUY" ? "text-up" : "text-down"}>{t.side}</span>
-                    <span className={`px-1 rounded text-[10px] font-bold ${t.result === "win" ? "text-up" : "text-down"}`}>
-                      {t.result === "win" ? "WIN" : "LOSS"}</span>
-                    <span className={t.pnl >= 0 ? "text-up" : "text-down"}>{t.pnl >= 0 ? "+" : ""}€{t.pnl}</span>
-                  </div>
-                ))}
-              </div>
+            <div className="rounded-lg border border-[#1E293B] bg-[#0B0E17] overflow-x-auto">
+              <table data-testid="forwardtest-trades-table" className="w-full text-left">
+                <thead>
+                  <tr className="overline border-b border-[#1E293B]">
+                    <th className="py-2 px-2 font-normal">#</th>
+                    <th className="py-2 px-2 font-normal">Lato</th>
+                    <th className="py-2 px-2 font-normal">Entrata</th>
+                    <th className="py-2 px-2 font-normal text-right">Prezzo In</th>
+                    <th className="py-2 px-2 font-normal">Uscita</th>
+                    <th className="py-2 px-2 font-normal text-right">Prezzo Out</th>
+                    <th className="py-2 px-2 font-normal text-right hidden sm:table-cell">SL</th>
+                    <th className="py-2 px-2 font-normal text-right hidden sm:table-cell">TP</th>
+                    <th className="py-2 px-2 font-normal text-center">Esito</th>
+                    <th className="py-2 px-2 font-normal text-right">PnL</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono text-[11px]">
+                  {res.trades.map((t, i) => (
+                    <tr key={i} className={`border-b border-[#1E293B]/50 hover:bg-[#131A24] ${t.exit_index <= clampIdx ? "" : "opacity-40"}`}>
+                      <td className="py-1.5 px-2 text-[#64748B]">{i + 1}</td>
+                      <td className={`py-1.5 px-2 font-bold ${t.side === "BUY" ? "text-up" : "text-down"}`}>{t.side}</td>
+                      <td className="py-1.5 px-2 text-[#94A3B8]">{fmtDate(t.entry_time)}</td>
+                      <td className="py-1.5 px-2 text-right">{t.entry}</td>
+                      <td className="py-1.5 px-2 text-[#94A3B8]">{fmtDate(t.exit_time)}</td>
+                      <td className="py-1.5 px-2 text-right">{t.exit}</td>
+                      <td className="py-1.5 px-2 text-right text-down hidden sm:table-cell">{t.sl}</td>
+                      <td className="py-1.5 px-2 text-right text-up hidden sm:table-cell">{t.tp}</td>
+                      <td className="py-1.5 px-2 text-center">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                          t.result === "win" ? "bg-[#10B981]/10 text-up"
+                          : t.result === "open" ? "bg-[#F59E0B]/10 text-[#F59E0B]"
+                          : "bg-[#EF4444]/10 text-down"}`}>
+                          {t.result === "win" ? "WIN" : t.result === "open" ? "APERTO" : "LOSS"}</span>
+                      </td>
+                      <td className={`py-1.5 px-2 text-right font-semibold ${t.pnl >= 0 ? "text-up" : "text-down"}`}>
+                        {t.pnl >= 0 ? "+" : ""}€{t.pnl}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 
           <p className="text-[10px] text-[#64748B] leading-relaxed">
-            {real ? "Dati storici reali dal broker Tickmill via MetaApi." :
-              "⚠️ Dati SIMULATI (MetaApi non ancora connesso al broker). Appena l'account risulterà CONNECTED, il forward-test userà automaticamente i dati reali Tickmill."}
+            {real ? "Dati storici reali dal broker Tickmill via MetaApi — puoi confrontare le date/prezzi direttamente nel tuo MT5." :
+              "⚠️ Dati SIMULATI. Appena l'account MetaApi risulta CONNECTED il forward-test usa i dati reali Tickmill."}
             {" "}Risultati a scopo educativo: le performance passate non garantiscono risultati futuri.
           </p>
         </div>

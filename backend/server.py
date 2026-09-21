@@ -521,101 +521,167 @@ async def backtest(body: BacktestReq, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # Forward-test (walk-forward) engine
 # ---------------------------------------------------------------------------
-def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, min_rr=1.5):
-    """Replay candles bar-by-bar applying Smart Money rules; returns trades,
-    equity curve and aggregate stats. Deterministic given the candle series."""
+def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrate"):
+    """Replay candles bar-by-bar; returns trades, mark-to-market equity and stats.
+    mode='balanced'    -> Smart Money RR~1.5 (aims for positive expectancy).
+    mode='highwinrate' -> mean-reversion, small TP + wide SL: high win-rate, tail risk.
+    mode='nosl'        -> NO stop loss: ~99% win-rate illusion; equity is mark-to-market
+                          so open floating losses are exposed honestly. Deterministic."""
     d = cfg["digits"]
     start_equity = 10000.0
-    equity = start_equity
+    realized = start_equity
     risk_amt = start_equity * risk_percent / 100.0
     trades, equity_curve = [], []
     open_trade = None
-    peak, max_dd = equity, 0.0
+    peak, max_dd = start_equity, 0.0
     n = len(candles)
+
+    def money(tr, price):
+        dirn = 1 if tr["side"] == "BUY" else -1
+        return dirn * (price - tr["entry"]) / tr["unit"] * risk_amt
 
     for i in range(n):
         candle = candles[i]
-        # 1) manage the currently open trade
+        # 1) manage the open trade (mark-to-market + TP/SL checks)
         if open_trade:
+            tr = open_trade
+            adverse = candle["l"] if tr["side"] == "BUY" else candle["h"]
+            tr["mae"] = min(tr.get("mae", 0.0), money(tr, adverse))
             hit = None
-            if open_trade["side"] == "BUY":
-                if candle["l"] <= open_trade["sl"]:
-                    hit = ("loss", open_trade["sl"])
-                elif candle["h"] >= open_trade["tp"]:
-                    hit = ("win", open_trade["tp"])
+            if tr["side"] == "BUY":
+                if tr.get("sl") is not None and candle["l"] <= tr["sl"]:
+                    hit = ("loss", tr["sl"])
+                elif candle["h"] >= tr["tp"]:
+                    hit = ("win", tr["tp"])
             else:
-                if candle["h"] >= open_trade["sl"]:
-                    hit = ("loss", open_trade["sl"])
-                elif candle["l"] <= open_trade["tp"]:
-                    hit = ("win", open_trade["tp"])
+                if tr.get("sl") is not None and candle["h"] >= tr["sl"]:
+                    hit = ("loss", tr["sl"])
+                elif candle["l"] <= tr["tp"]:
+                    hit = ("win", tr["tp"])
             if hit:
                 result, exit_price = hit
-                rr = abs(open_trade["tp"] - open_trade["entry"]) / max(
-                    abs(open_trade["entry"] - open_trade["sl"]), 1e-9)
-                pnl = round(risk_amt * (rr if result == "win" else -1.0), 2)
-                equity = round(equity + pnl, 2)
-                open_trade.update({"exit_index": i, "exit": round(exit_price, d),
-                                   "result": result, "pnl": pnl})
-                trades.append(open_trade)
+                pnl = round(money(tr, exit_price), 2)
+                realized = round(realized + pnl, 2)
+                tr.update({"exit_index": i, "exit": round(exit_price, d),
+                           "exit_time": candle.get("time"), "result": result,
+                           "pnl": pnl, "mae": round(tr.get("mae", 0.0), 2)})
+                trades.append(tr)
                 open_trade = None
 
         # 2) look for a new entry when flat and past warmup
         if not open_trade and i >= warmup:
             window = candles[max(0, i - warmup):i + 1]
-            zones = smart_money_zones(window, cfg)
             price = candle["c"]
-            sig = protect = target = None
-            for b in zones["order_blocks"]:
-                if b["type"] == "bullish" and zones["bias"] != "bearish" \
-                        and b["bottom"] * 0.999 <= candle["l"] <= b["top"] * 1.001:
-                    sig, protect, target = "BUY", zones["recent_low"], zones["liquidity"]["buy_side"]
-                    break
-                if b["type"] == "bearish" and zones["bias"] != "bullish" \
-                        and b["bottom"] * 0.999 <= candle["h"] <= b["top"] * 1.001:
-                    sig, protect, target = "SELL", zones["recent_high"], zones["liquidity"]["sell_side"]
-                    break
-            # fallback entry: retest into a fresh fair value gap aligned with bias
-            if not sig:
-                for f in zones["fvg"]:
-                    if f["type"] == "bullish" and zones["bias"] != "bearish" \
-                            and f["bottom"] * 0.999 <= price <= f["top"] * 1.001:
-                        sig, protect, target = "BUY", zones["recent_low"], zones["liquidity"]["buy_side"]
-                        break
-                    if f["type"] == "bearish" and zones["bias"] != "bullish" \
-                            and f["bottom"] * 0.999 <= price <= f["top"] * 1.001:
-                        sig, protect, target = "SELL", zones["recent_high"], zones["liquidity"]["sell_side"]
-                        break
+            sma = sum(c["c"] for c in window[-20:]) / min(20, len(window))
+            win_atr = candles[max(0, i - 14):i]
+            atr = (sum(c["h"] - c["l"] for c in win_atr) / len(win_atr)) if win_atr else cfg["vol"]
+            if atr <= 0:
+                atr = cfg["vol"]
+            sig = None
+
+            if mode in ("highwinrate", "nosl"):
+                # mean-reversion in the direction of the short trend
+                if price > sma and candle["c"] < candle["o"]:
+                    sig = "BUY"
+                elif price < sma and candle["c"] > candle["o"]:
+                    sig = "SELL"
+                tp_mult, sl_mult = 0.5, (None if mode == "nosl" else 8.0)
+            else:
+                # balanced Smart Money: order block / FVG / continuation + trend filter
+                zones = smart_money_zones(window, cfg)
+                for b in zones["order_blocks"]:
+                    if b["type"] == "bullish" and zones["bias"] != "bearish" \
+                            and b["bottom"] * 0.999 <= candle["l"] <= b["top"] * 1.001:
+                        sig = "BUY"; break
+                    if b["type"] == "bearish" and zones["bias"] != "bullish" \
+                            and b["bottom"] * 0.999 <= candle["h"] <= b["top"] * 1.001:
+                        sig = "SELL"; break
+                if not sig:
+                    for f in zones["fvg"]:
+                        if f["type"] == "bullish" and zones["bias"] != "bearish" \
+                                and f["bottom"] * 0.999 <= price <= f["top"] * 1.001:
+                            sig = "BUY"; break
+                        if f["type"] == "bearish" and zones["bias"] != "bullish" \
+                                and f["bottom"] * 0.999 <= price <= f["top"] * 1.001:
+                            sig = "SELL"; break
+                if not sig and i >= 1:
+                    prev = candles[i - 1]
+                    if zones["bias"] != "bearish" and prev["c"] < prev["o"] \
+                            and candle["c"] > candle["o"] and candle["c"] > prev["h"]:
+                        sig = "BUY"
+                    elif zones["bias"] != "bullish" and prev["c"] > prev["o"] \
+                            and candle["c"] < candle["o"] and candle["c"] < prev["l"]:
+                        sig = "SELL"
+                if sig == "BUY" and price < sma:
+                    sig = None
+                elif sig == "SELL" and price > sma:
+                    sig = None
+                tp_mult, sl_mult = 2.0, 1.3
+
             if sig:
                 entry = price
-                if sig == "BUY":
-                    sl = min(protect, entry - cfg["vol"] * 1.2)
-                    risk = entry - sl
-                    tp = max(target, entry + risk * min_rr)
+                if sl_mult is None:  # no stop loss
+                    unit = atr
+                    sl = None
+                    tp = entry + atr * tp_mult if sig == "BUY" else entry - atr * tp_mult
                 else:
-                    sl = max(protect, entry + cfg["vol"] * 1.2)
-                    risk = sl - entry
-                    tp = min(target, entry - risk * min_rr)
-                if risk > 0:
-                    open_trade = {"entry_index": i, "side": sig, "entry": round(entry, d),
-                                  "sl": round(sl, d), "tp": round(tp, d)}
+                    if sig == "BUY":
+                        sl = entry - atr * sl_mult
+                        tp = entry + atr * tp_mult
+                    else:
+                        sl = entry + atr * sl_mult
+                        tp = entry - atr * tp_mult
+                    unit = abs(entry - sl)
+                if unit > 0:
+                    open_trade = {"entry_index": i, "entry_time": candle.get("time"),
+                                  "side": sig, "entry": round(entry, d),
+                                  "sl": round(sl, d) if sl is not None else None,
+                                  "tp": round(tp, d), "unit": unit, "mae": 0.0}
 
-        peak = max(peak, equity)
-        dd = (peak - equity) / peak * 100 if peak else 0
+        # 3) mark-to-market equity (realized + floating of any open trade)
+        floating = money(open_trade, candle["c"]) if open_trade else 0.0
+        mtm = realized + floating
+        peak = max(peak, mtm)
+        dd = (peak - mtm) / peak * 100 if peak else 0
         max_dd = max(max_dd, dd)
-        equity_curve.append(round(equity, 2))
+        equity_curve.append(round(mtm, 2))
 
-    wins = sum(1 for t in trades if t["result"] == "win")
-    total = len(trades)
-    gross_win = sum(t["pnl"] for t in trades if t["pnl"] > 0)
-    gross_loss = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+    # trade still open at the end -> exposed as unrealized floating (honesty)
+    open_floating = 0.0
+    if open_trade:
+        tr = open_trade
+        last = candles[-1]
+        fl = round(money(tr, last["c"]), 2)
+        tr.update({"exit_index": n - 1, "exit": round(last["c"], d), "exit_time": None,
+                   "result": "open", "pnl": fl, "mae": round(tr.get("mae", 0.0), 2)})
+        trades.append(tr)
+        open_floating = fl
+
+    closed = [t for t in trades if t["result"] in ("win", "loss")]
+    wins = sum(1 for t in closed if t["result"] == "win")
+    total = len(closed)
+    gross_win = sum(t["pnl"] for t in closed if t["pnl"] > 0)
+    gross_loss = abs(sum(t["pnl"] for t in closed if t["pnl"] < 0))
     pf = round(gross_win / gross_loss, 2) if gross_loss else (round(gross_win, 2) if gross_win else 0)
+    avg_win = round(gross_win / wins, 2) if wins else 0
+    avg_loss = round(gross_loss / (total - wins), 2) if (total - wins) else 0
+    true_equity = round(realized + open_floating, 2)
+    worst_mae = round(min([t.get("mae", 0.0) for t in trades], default=0.0), 2)
+    open_trades = sum(1 for t in trades if t["result"] == "open")
+    for t in trades:
+        t.pop("unit", None)
     return {
-        "start_equity": start_equity, "final_equity": equity,
+        "start_equity": start_equity, "final_equity": true_equity,
         "trades": trades, "equity_curve": equity_curve,
         "winrate": round(wins / total * 100, 1) if total else 0,
         "total_trades": total, "wins": wins, "losses": total - wins,
         "profit_factor": pf, "max_drawdown": round(max_dd, 2),
-        "net_profit": round(equity - start_equity, 2),
+        "net_profit": round(realized - start_equity, 2),
+        "realized_net": round(realized - start_equity, 2),
+        "avg_win": avg_win, "avg_loss": avg_loss,
+        "expectancy": round((realized - start_equity) / total, 2) if total else 0,
+        "open_trades": open_trades, "open_floating": round(open_floating, 2),
+        "true_equity": true_equity, "worst_floating": worst_mae,
     }
 
 
@@ -624,6 +690,7 @@ class ForwardTestReq(BaseModel):
     timeframe: str = "M15"
     bars: int = 320
     risk_percent: float = 1.0
+    mode: str = "highwinrate"
 
 
 @api_router.get("/datasource/status")
@@ -636,16 +703,18 @@ async def forwardtest_run(body: ForwardTestReq, user: dict = Depends(get_current
     if body.symbol not in INSTRUMENTS:
         raise HTTPException(status_code=404, detail="Strumento non trovato")
     cfg = INSTRUMENTS[body.symbol]
-    bars = max(120, min(body.bars, 600))
+    bars = max(120, min(body.bars, 800))
+    mode = body.mode if body.mode in ("highwinrate", "balanced", "nosl") else "highwinrate"
     real = await metaapi_service.fetch_candles(body.symbol, body.timeframe, bars)
     if real and len(real) >= 80:
         candles, source = real[-bars:], "real"
     else:
         candles, _ = generate_candles(body.symbol, body.timeframe, bars)
         source = "simulated"
-    res = run_forward_test(candles, cfg, body.risk_percent)
+    res = run_forward_test(candles, cfg, body.risk_percent, mode=mode)
     return {"symbol": body.symbol, "timeframe": body.timeframe, "source": source,
-            "digits": cfg["digits"], "candles": candles, "warmup": 45, **res}
+            "mode": mode, "digits": cfg["digits"], "candles": candles, "warmup": 45,
+            "period_start": candles[0]["time"], "period_end": candles[-1]["time"], **res}
 
 
 class LiveOrderReq(BaseModel):
