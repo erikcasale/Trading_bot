@@ -1,0 +1,200 @@
+{
+  "project_name": "Apex Flow",
+  "tagline": "Piattaforma di Trading Automatico Istituzionale & Smart Money Flow",
+  "app_type": "dashboard",
+  "language": "it",
+  "ai_model": "Claude Sonnet 4.6",
+  "archetype": "ARCHETYPE 2: THE PERFORMANCE PRO (Institutional Trading Terminal)",
+  "emotional_tone": "High-precision, tactical, ultra-secure, institutional-grade, data-dense, dark command center",
+  "design_principles": [
+    "Precision over Decorative Slop: Zero AI-purple gradients (#7351B7 banned). Use deep obsidian (#0B0E17 / #0F172A) with crisp 1px subtle borders.",
+    "Semantic Color Discipline: Emerald Green (#10B981 / #00D4AA) for bullish/gain/buy, Crimson Red (#EF4444 / #FF4757) for bearish/loss/sell, Amber Gold (#F59E0B) for institutional liquidity sweeps/Order Blocks.",
+    "Monospaced Data Precision: JetBrains Mono or IBM Plex Mono for all financial values, PnL, lot sizes, order prices, timestamps, and order block zones.",
+    "Italian Institutional Terminology: 'Analisi Liquidità', 'Order Block Istituzionale', 'Fair Value Gap (FVG)', 'Struttura di Mercato (BOS/CHoCH)', 'Simulatore Backtest 98% Winrate', 'Connessione Broker Tickmill'.",
+    "High Density Layout (Mode B): Dense 4-column cockpit with L2 simulated order book, candlestick chart with Smart Money overlays, AI signal feed, active bot control widget, and backtest performance metrics."
+  ],
+  "colors": {
+    "background": {
+      "main": "#080B10",
+      "surface": "#0F141C",
+      "card": "#131A24",
+      "card_hover": "#1A2332",
+      "header_overlay": "rgba(15, 20, 28, 0.85)",
+      "dropdown": "#161D29"
+    },
+    "borders": {
+      "subtle": "#1E293B",
+      "default": "#334155",
+      "active": "#0EA5E9",
+      "bullish": "#10B981",
+      "bearish": "#EF4444",
+      "warning": "#F59E0B"
+    },
+    "text": {
+      "primary": "#F8FAFC",
+      "secondary": "#94A3B8",
+      "muted": "#64748B",
+      "inverse": "#090D14"
+    },
+    "accents": {
+      "cyan_tactical": "#0EA5E9",
+      "bullish_green": "#10B981",
+      "bearish_red": "#EF4444",
+      "liquidity_amber": "#F59E0B",
+      "ai_violet_glow": "#8B5CF6",
+      "smart_money_navy": "#1E293B"
+    },
+    "gradients": {
+      "bullish_fill": "linear-gradient(180deg, rgba(16, 185, 129, 0.15) 0%, rgba(16, 185, 129, 0) 100%)",
+      "bearish_fill": "linear-gradient(180deg, rgba(239, 68, 68, 0.15) 0%, rgba(239, 68, 68, 0) 100%)",
+      "tactical_glow": "linear-gradient(135deg, rgba(14, 165, 233, 0.2) 0%, rgba(139, 92, 246, 0.05) 100%)",
+      "card_highlight": "linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 100%)"
+    },
+    "forbidden_colors": [
+      "#7351B7",
+      "#1B93A4",
+      "pure #000000 without blue tint",
+      "bright purple full-screen gradients"
+    ]
+  },
+  "typography": {
+    "heading_font": "Outfit, Barlow, sans-serif",
+    "body_font": "Manrope, sans-serif",
+    "mono_font": "JetBrains Mono, IBM Plex Mono, monospace",
+    "scale": {
+      "h1_hero": "text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight",
+      "h2_section": "text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight",
+      "h3_card": "text-lg sm:text-xl font-semibold",
+      "body_regular": "text-sm text-slate-300 leading-relaxed",
+      "data_ticker": "font-mono text-sm tracking-wider font-medium",
+      "label_overline": "text-xs font-mono uppercase tracking-widest text-slate-400"
+    }
+  },
+  "layout_and_grid": {
+    "mode": "MODE B: High Density Grid (Trading Dashboard Cockpit)",
+    "container_padding": "p-3 sm:p-5 space-y-4",
+    "grid_structure": "grid grid-cols-1 md:grid-cols-4 lg:grid-cols-12 gap-3 md:gap-4",
+    "panel_spans": {
+      "watchlist": "col-span-12 lg:col-span-3 xl:col-span-2",
+      "main_chart_and_analysis": "col-span-12 lg:col-span-6 xl:col-span-7 space-y-4",
+      "bot_execution_and_orderbook": "col-span-12 lg:col-span-3 xl:col-span-3 space-y-4",
+      "positions_table": "col-span-12",
+      "backtest_engine": "col-span-12"
+    }
+  },
+  "components": {
+    "header": {
+      "style": "sticky top-0 z-50 bg-[#0F141C]/90 backdrop-blur-md border-b border-slate-800 px-4 py-2.5 flex items-center justify-between",
+      "elements": [
+        "Brand Logo: Apex Flow (with glowing cyan status dot 'Claude 4.6 Active')",
+        "Live Market Ticker Marquee (EUR/USD, BTC/USDT, XAU/USD, NVDA, US30)",
+        "Mode Switcher (Conto Demo $100.000 / Tickmill Real Broker Pending)",
+        "Quick Action: Bot Emergency Kill Switch / Fast Order Execution",
+        "User Profile Avatar + Account Balance Badge ($100,000.00 Demo USDT)"
+      ]
+    },
+    "login_auth_screen": {
+      "style": "min-h-screen bg-[#080B10] flex items-center justify-center p-4 relative overflow-hidden",
+      "features": [
+        "Card with glassmorphism border-slate-800 bg-[#0F141C]/95 p-8 max-w-md w-full shadow-2xl rounded-xl",
+        "Mode Selector: 'Accedi con Account Demo (Gratuito)' vs 'Connetti Broker Live (Tickmill)'",
+        "Pre-filled Demo Login CTA ('Entra nel Terminale Demo')",
+        "Trust Badges: Encryption 256-bit, Tickmill ECN Bridge Ready, Claude Sonnet 4.6 Engine",
+        "Background: Simulated order book depth map background with low opacity"
+      ]
+    },
+    "ai_smart_money_panel": {
+      "title": "Analisi Istituzionale AI (Smart Money Concepts)",
+      "features": [
+        "Bias Istituzionale: Strongly Bullish / Liquidity Sweep Detected (Score 98%)",
+        "Order Block Active Zones (OB H4 / FVG M15 / Break of Structure)",
+        "Liquidity Map Indicator: High-volume buy/sell stops pools identified",
+        "AI Trade Setup Generator: Entry Price, Stop Loss below Swing Low, Take Profit 1/2/3",
+        "Sonnet 4.6 Institutional Reasoning narrative card in Italian"
+      ]
+    },
+    "bot_control_panel": {
+      "title": "Pannello Bot Trading Automatico",
+      "features": [
+        "Bot Status Toggle: [ATTIVO - IN ESECUZIONE] / [PAUSA]",
+        "Target Winrate Protection System: Algoritmo impostato su 98% Winrate Filter",
+        "Risk Management Config: Max drawdown (e.g., 1.5%), Lot Sizing (Dynamic % Equity), Max Open Trades (3)",
+        "Broker Gateway: Tickmill ECN Demo Bridge (Latenza 2ms)",
+        "One-Click Emergency Stop ('Pulsante di Blocco di Emergenza')"
+      ]
+    },
+    "backtest_runner": {
+      "title": "Simulatore & Runner Backtest 98% Winrate",
+      "features": [
+        "Interactive Historical Range Slider (1 Mese, 6 Mesi, 1 Anno, 3 Anni)",
+        "Equity Curve Chart (Area Chart high contrast emerald line with fill)",
+        "Key Metrics Display Cards: Win Rate (98.2%), Profit Factor (4.12), Max Drawdown (-1.4%), Total Trades (428), Total Net Profit (+€48,290.00)",
+        "Forward-Testing Live Log Monitor"
+      ]
+    },
+    "candlestick_chart": {
+      "title": "Grafico Ticker & Struttura di Mercato Live",
+      "features": [
+        "Timeframe Selector: M1, M5, M15, H1, H4, D1",
+        "Overlays Toggle: Order Blocks (OB), Fair Value Gaps (FVG), Premium/Discount Zones, Liquidity Sweeps",
+        "Simulated Real-time Price Stream with tick animations",
+        "Indicators Bar: RSI, Order Flow Delta, Volume Profile"
+      ]
+    },
+    "positions_table": {
+      "title": "Posizioni Aperte & Storico Esecuzioni",
+      "features": [
+        "Tabs: Posizioni Attive (3), Ordini Pendenti (1), Storico Operazioni (142)",
+        "Columns: Simbolo, Tipo (BUY/SELL), Lotto, Prezzo Ingresso, Prezzo Corrente, SL, TP, PnL Non Realizzato (€ / %), Azioni (Chiudi Ora)",
+        "Monospaced data cells with green/red PnL badge highlighting"
+      ]
+    }
+  },
+  "micro_interactions_and_motion": {
+    "hover_effects": "Subtle border lighting, bg-slate-800/60 shift, hover text transition (no transition: all)",
+    "active_bot_pulse": "Animate pulse indicator dot on Bot Status Badge (green ring animation)",
+    "price_tick_flash": "Brief green/red background flash on price tick changes in orderbook and chart ticker",
+    "toast_notifications": "Use Sonner for order execution toasts ('Ordini automatici eseguiti con successo', 'Stop Loss aggiornato')",
+    "keyboard_shortcuts": "Press 'B' to buy, 'S' to sell, 'Space' to pause bot, '/' to search instruments"
+  },
+  "image_urls": {
+    "trading_chart_dark": "https://images.pexels.com/photos/16594725/pexels-photo-16594725.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "candlestick_crypto_chart": "https://images.pexels.com/photos/39494584/pexels-photo-39494584.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "dark_monitors_terminal": "https://images.pexels.com/photos/38412413/pexels-photo-38412413.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "trader_working_late": "https://images.pexels.com/photos/39076656/pexels-photo-39076656.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+  },
+  "testing_and_accessibility": {
+    "data_testids": [
+      "login-email-input",
+      "login-password-input",
+      "login-demo-submit-button",
+      "bot-status-toggle",
+      "bot-emergency-stop-button",
+      "risk-management-lot-input",
+      "risk-management-max-drawdown",
+      "backtest-run-button",
+      "backtest-timeframe-select",
+      "backtest-winrate-stat",
+      "backtest-equity-chart",
+      "market-watchlist-item-eurusd",
+      "market-watchlist-item-btcusdt",
+      "candlestick-chart-container",
+      "ai-order-block-card",
+      "ai-liquidity-bias-badge",
+      "open-positions-table",
+      "close-position-button-0"
+    ],
+    "contrast_standards": "APCA 4.5:1 for body, 3:1 for large data headers",
+    "keyboard_nav": "Full tab ordering on order inputs and control toggles"
+  },
+  "instructions_to_main_agent": [
+    "Build the Apex Flow trading terminal app in React JS (using .js/.jsx components in src/components/).",
+    "Use Italian language for all titles, labels, tools, tooltips, and AI Smart Money analysis reports.",
+    "Default to a dark, high-contrast institutional trading layout using the specified slate/obsidian palette.",
+    "Implement the simulated live candlestick chart (using Recharts or Lightweight Canvas) with Order Block & Liquidity zone overlays.",
+    "Implement the Bot Control panel with live start/stop state, risk config inputs, and emergency stop.",
+    "Implement the Backtest engine visualizer showcasing the target 98% winrate metric, drawdown curve, and profit metrics.",
+    "Ensure all interactive buttons, inputs, tables, and stat badges contain their respective data-testid attributes.",
+    "Integrate Sonner toasts for trading alerts and order executions."
+  ]
+}
