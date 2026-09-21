@@ -1,37 +1,36 @@
 # Apex Flow — PRD
 
 ## Problema originale (utente, IT)
-"Voglio un app per fare trading automatico. Ma non il trading retail che fanno tutti, voglio un metodo sicuro con winrate al 98%."
+"App di trading automatico, non retail, metodo sicuro con winrate 98%." Poi: forward-test, dati reali Tickmill, winrate ≥85%, e infine "+50% annuo".
+Posizione onesta comunicata: nessun sistema garantisce 98%/85%/+50%. Costruito come terminale DEMO/educativo che mostra la realtà (winrate alto ≠ profitto; overfitting; rischio della coda / no-SL).
 
-Nota di onestà comunicata all'utente: nessun sistema garantisce il 98% di winrate. Costruito come **terminale dimostrativo/educativo** in stile istituzionale "Smart Money", con dati simulati e disclaimer chiari.
+## Stack & Architettura
+- Backend FastAPI (`/app/backend/server.py`), MongoDB (motor), JWT Bearer (`apex_token` in localStorage).
+- Frontend React (CRA+craco, alias `@`), Tailwind, shadcn/ui, recharts, lucide, sonner.
+- AI: Claude Sonnet 4.6 via emergentintegrations (analisi Smart Money).
+- Dati mercato: simulati server-side + REALI Tickmill via MetaApi (`/app/backend/metaapi_service.py`, fallback automatico a simulato).
 
-## Scelte utente
-- Fase attuale: backtest + forward-test (dati simulati). Broker reale **Tickmill**: predisposto come step futuro, mostrato "pending", NON implementato.
-- Mercati: mix (crypto / forex / azioni).
-- Strategia: analisi AI "Smart Money" / order flow istituzionale (order block, FVG, liquidità, market structure) — non strategie retail.
-- AI: **Claude Sonnet 4.6** (Emergent Universal Key).
-- Auth: email/password con account demo pre-seedato.
-- Dati mercato: simulati/demo.
-
-## Architettura
-- Backend FastAPI (`/app/backend/server.py`), MongoDB (motor). Auth JWT Bearer (token in localStorage `apex_token`).
-- Frontend React (CRA + craco, alias `@`→src), Tailwind, shadcn/ui, recharts, lucide, sonner.
-- AI via `emergentintegrations` (LlmChat, anthropic/claude-sonnet-4-6) con fallback deterministico.
-- Simulazione mercato server-side (random walk seedato per simbolo/timeframe) + zone Smart Money calcolate (swing, order block, FVG, liquidità, struttura).
+## Integrazioni
+- MetaApi/Tickmill: account MT5 demo (85584886, TickmillUK-Demo) CONNECTED. `.env`: METAAPI_TOKEN, METAAPI_ACCOUNT_ID. Storico OHLC reale, stato connessione, esecuzione ordini (guarded, /forwardtest/execute-live).
+- Claude Sonnet 4.6 (EMERGENT_LLM_KEY).
 
 ## Implementato (2026-09-21)
-- Login/Register + demo login (demo@apexflow.io / apexflow2026), account seedato con $100k, bot config, 3 posizioni attive, ~24 storiche.
-- Dashboard cockpit: Header con ticker live + saldo + kill switch, Watchlist multi-asset con ricerca, grafico candlestick SVG live con overlay OB/FVG/Liquidità e selettore timeframe.
-- Pannello AI Smart Money (Claude 4.6): bias, confidence, narrativa IT, setup entry/SL/TP1-3.
-- Pannello Bot: avvio/pausa, config risk (winrate filter, max drawdown, rischio %, max trade), blocco di emergenza, gateway Tickmill (pending).
-- Backtest runner: winrate/profit factor/drawdown/net profit, equity curve, log; disclaimer risultati simulati.
-- Tabella posizioni: attive con PnL live + storico, chiusura posizione con aggiornamento saldo.
-- Disclaimer educativi su rischio e natura simulata.
-- Verificato: 24/24 test backend + flusso e2e frontend completo.
+- Auth JWT + account demo (demo@apexflow.io / apexflow2026), dashboard cockpit, watchlist multi-asset, grafico candlestick live con overlay OB/FVG/liquidità.
+- Analisi AI Smart Money (Claude) con livelli entry/SL/TP disegnati sul grafico.
+- Bot panel (config rischio, kill switch), backtest runner, tabella posizioni.
+- Datasource MetaApi: `/api/datasource/status`, fetch candele reali con fallback.
+- Forward-test walk-forward (`/api/forwardtest/run`): replay barra-per-barra, modello monetario unificato, equity mark-to-market, date dei trade, preset periodo (Settimana/Mese/Trimestre/Anno=D1/365), tabella operazioni per verifica manuale.
+  - Modalità: `balanced` (SMC RR~1.5), `highwinrate` (mean-reversion TP piccolo/SL ampio → WR reale 85-98% ma tail risk), `nosl` (NO stop → illusione ~100% WR smascherata via equity reale/flottante/peggior flottante).
+- Ottimizzatore (`/api/optimize`): grid search (entry smc/meanrev/breakout × TP × SL × trend-filter) su dati reali, scoring Calmar (annual/DD, PF≥1.05), annualizzazione, dimensionamento rischio verso target +50% annuo con cap DD; config applicabile al forward-test (params passthrough → mode "optimized"). Avvertenza overfitting in UI.
+- Verifiche: iterazioni 1-4 tutte verdi (24 + 8 + 12 + 18 test), nessun bug aperto.
+
+## Note di onestà (fondamentali)
+- Winrate alto è reale ma NON implica profitto (vedi PF/expectancy).
+- No-SL: equity mark-to-market mostra conto sott'acqua nonostante ~100% WR.
+- +50% annuo dell'ottimizzatore = proiezione IN-SAMPLE su finestra breve → rischio overfitting elevato, non garantito.
 
 ## Backlog / prossimi step
-- P1: Connessione reale broker Tickmill (richiede credenziali/API utente; rischioso).
-- P1: Auto-refresh streaming (WebSocket) per prezzi e posizioni invece del polling.
-- P2: Persistenza storico analisi AI e alert automatici.
-- P2: Split di server.py in router modulari.
-- P2: Notifiche/esecuzioni automatiche del bot che aprono posizioni simulate.
+- P1: Walk-forward out-of-sample (train/test split) per stimare la degradazione reale della config ottimizzata.
+- P1: Esecuzione live guidata su Tickmill demo dal setup ottimizzato (con conferma + kill switch).
+- P2: Split di server.py in router/servizi (~880 righe).
+- P2: Ottimizzatore in executor per non bloccare l'event loop; paginazione storico per periodi multi-anno.
