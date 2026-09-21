@@ -521,12 +521,19 @@ async def backtest(body: BacktestReq, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # Forward-test (walk-forward) engine
 # ---------------------------------------------------------------------------
-def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrate"):
+MODE_PRESETS = {
+    "balanced":    {"entry": "smc",     "tp_mult": 2.0, "sl_mult": 1.3, "trend_filter": True},
+    "highwinrate": {"entry": "meanrev", "tp_mult": 0.5, "sl_mult": 8.0, "trend_filter": False},
+    "nosl":        {"entry": "meanrev", "tp_mult": 0.5, "sl_mult": None, "trend_filter": False},
+}
+
+
+def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrate", params=None):
     """Replay candles bar-by-bar; returns trades, mark-to-market equity and stats.
-    mode='balanced'    -> Smart Money RR~1.5 (aims for positive expectancy).
-    mode='highwinrate' -> mean-reversion, small TP + wide SL: high win-rate, tail risk.
-    mode='nosl'        -> NO stop loss: ~99% win-rate illusion; equity is mark-to-market
-                          so open floating losses are exposed honestly. Deterministic."""
+    Entry/exit are driven by `params` (or a preset from `mode`):
+      entry: 'smc' | 'meanrev' | 'breakout', tp_mult, sl_mult (None=no stop), trend_filter.
+    Deterministic given the candle series (no fabricated numbers)."""
+    p = params or MODE_PRESETS.get(mode, MODE_PRESETS["highwinrate"])
     d = cfg["digits"]
     start_equity = 10000.0
     realized = start_equity
@@ -578,16 +585,20 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrat
             if atr <= 0:
                 atr = cfg["vol"]
             sig = None
-
-            if mode in ("highwinrate", "nosl"):
-                # mean-reversion in the direction of the short trend
+            entry_mode = p["entry"]
+            if entry_mode == "meanrev":
                 if price > sma and candle["c"] < candle["o"]:
                     sig = "BUY"
                 elif price < sma and candle["c"] > candle["o"]:
                     sig = "SELL"
-                tp_mult, sl_mult = 0.5, (None if mode == "nosl" else 8.0)
-            else:
-                # balanced Smart Money: order block / FVG / continuation + trend filter
+            elif entry_mode == "breakout":
+                if i >= 1:
+                    prev = candles[i - 1]
+                    if prev["c"] < prev["o"] and candle["c"] > candle["o"] and candle["c"] > prev["h"]:
+                        sig = "BUY"
+                    elif prev["c"] > prev["o"] and candle["c"] < candle["o"] and candle["c"] < prev["l"]:
+                        sig = "SELL"
+            else:  # smc
                 zones = smart_money_zones(window, cfg)
                 for b in zones["order_blocks"]:
                     if b["type"] == "bullish" and zones["bias"] != "bearish" \
@@ -612,11 +623,13 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrat
                     elif zones["bias"] != "bullish" and prev["c"] > prev["o"] \
                             and candle["c"] < candle["o"] and candle["c"] < prev["l"]:
                         sig = "SELL"
+
+            if p.get("trend_filter"):
                 if sig == "BUY" and price < sma:
                     sig = None
                 elif sig == "SELL" and price > sma:
                     sig = None
-                tp_mult, sl_mult = 2.0, 1.3
+            tp_mult, sl_mult = p["tp_mult"], p["sl_mult"]
 
             if sig:
                 entry = price
@@ -691,6 +704,7 @@ class ForwardTestReq(BaseModel):
     bars: int = 320
     risk_percent: float = 1.0
     mode: str = "highwinrate"
+    params: Optional[dict] = None
 
 
 @api_router.get("/datasource/status")
@@ -711,10 +725,99 @@ async def forwardtest_run(body: ForwardTestReq, user: dict = Depends(get_current
     else:
         candles, _ = generate_candles(body.symbol, body.timeframe, bars)
         source = "simulated"
-    res = run_forward_test(candles, cfg, body.risk_percent, mode=mode)
+    res = run_forward_test(candles, cfg, body.risk_percent, mode=mode, params=body.params)
     return {"symbol": body.symbol, "timeframe": body.timeframe, "source": source,
-            "mode": mode, "digits": cfg["digits"], "candles": candles, "warmup": 45,
+            "mode": "optimized" if body.params else mode, "digits": cfg["digits"],
+            "candles": candles, "warmup": 45,
             "period_start": candles[0]["time"], "period_end": candles[-1]["time"], **res}
+
+
+class OptimizeReq(BaseModel):
+    symbol: str
+    timeframe: str = "H1"
+    bars: int = 500
+    target_annual: float = 50.0
+    max_dd: float = 40.0
+
+
+def _period_days(candles, timeframe):
+    try:
+        a = str(candles[0]["time"]).replace("Z", "+00:00")
+        b = str(candles[-1]["time"]).replace("Z", "+00:00")
+        days = (datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds() / 86400.0
+        if days > 0.5:
+            return days
+    except Exception:
+        pass
+    return max(1.0, len(candles) * TF_MIN.get(timeframe, 60) / 1440.0)
+
+
+@api_router.post("/optimize")
+async def optimize(body: OptimizeReq, user: dict = Depends(get_current_user)):
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    cfg = INSTRUMENTS[body.symbol]
+    bars = max(200, min(body.bars, 700))
+    real = await metaapi_service.fetch_candles(body.symbol, body.timeframe, bars)
+    if real and len(real) >= 120:
+        candles, source = real[-bars:], "real"
+    else:
+        candles, _ = generate_candles(body.symbol, body.timeframe, bars)
+        source = "simulated"
+    days = _period_days(candles, body.timeframe)
+
+    best = None
+    tested = 0
+    for entry in ("smc", "meanrev", "breakout"):
+        for tp in (0.5, 1.0, 1.5, 2.0):
+            for sl in (1.0, 1.5, 2.5):
+                for tfil in (True, False):
+                    params = {"entry": entry, "tp_mult": tp, "sl_mult": sl, "trend_filter": tfil}
+                    res = run_forward_test(candles, cfg, 1.0, params=params)
+                    tested += 1
+                    if res["total_trades"] < 12:
+                        continue
+                    ret_pct = res["realized_net"] / res["start_equity"] * 100
+                    annual = ret_pct * (365.0 / days)
+                    dd = max(res["max_drawdown"], 0.1)
+                    good = res["profit_factor"] >= 1.05 and annual > 0
+                    score = (annual / dd) if good else (-1e6 + annual)
+                    cand = {"params": params, "annual_1pct": round(annual, 2),
+                            "dd_1pct": round(res["max_drawdown"], 2), "winrate": res["winrate"],
+                            "profit_factor": res["profit_factor"], "trades": res["total_trades"],
+                            "score": score}
+                    if best is None or cand["score"] > best["score"]:
+                        best = cand
+
+    if best is None:
+        raise HTTPException(status_code=422, detail="Dati insufficienti per l'ottimizzazione")
+
+    annual_1pct = best["annual_1pct"]
+    dd_1pct = max(best["dd_1pct"], 0.1)
+    if annual_1pct <= 0:
+        recommended_risk, projected_annual, projected_dd, reached = 1.0, annual_1pct, dd_1pct, False
+    else:
+        risk_for_target = body.target_annual / annual_1pct
+        risk_for_dd = body.max_dd / dd_1pct
+        recommended_risk = round(max(0.25, min(5.0, risk_for_target, risk_for_dd)), 2)
+        projected_annual = round(annual_1pct * recommended_risk, 1)
+        projected_dd = round(dd_1pct * recommended_risk, 1)
+        reached = projected_annual >= body.target_annual * 0.999
+
+    final = run_forward_test(candles, cfg, recommended_risk, params=best["params"])
+    return {
+        "symbol": body.symbol, "timeframe": body.timeframe, "source": source,
+        "days": round(days, 1), "combos_tested": tested,
+        "period_start": candles[0]["time"], "period_end": candles[-1]["time"],
+        "best_params": best["params"], "winrate": best["winrate"],
+        "profit_factor": best["profit_factor"], "trades": best["trades"],
+        "annual_at_1pct": annual_1pct, "dd_at_1pct": best["dd_1pct"],
+        "recommended_risk_percent": recommended_risk,
+        "projected_annual_return": projected_annual, "projected_max_drawdown": projected_dd,
+        "target_annual": body.target_annual, "target_reached": reached,
+        "final_equity": final["true_equity"], "realized_net": final["realized_net"],
+        "equity_curve": final["equity_curve"],
+    }
 
 
 class LiveOrderReq(BaseModel):

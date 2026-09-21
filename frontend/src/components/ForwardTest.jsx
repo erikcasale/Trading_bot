@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { LineChart, Line, YAxis, ResponsiveContainer, Tooltip } from "recharts";
-import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle } from "lucide-react";
+import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target } from "lucide-react";
 
 const PERIODS = [
   ["Settimana", "M15", 480],
@@ -30,10 +30,12 @@ export default function ForwardTest({ symbol }) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(3);
   const [ds, setDs] = useState(null);
+  const [opt, setOpt] = useState(null);
+  const [optLoading, setOptLoading] = useState(false);
   const timer = useRef(null);
 
   useEffect(() => { api.get("/datasource/status").then((r) => setDs(r.data)).catch(() => {}); }, []);
-  useEffect(() => { setRes(null); setPlaying(false); setIdx(0); }, [symbol]);
+  useEffect(() => { setRes(null); setPlaying(false); setIdx(0); setOpt(null); }, [symbol]);
 
   const run = async () => {
     setLoading(true); setPlaying(false);
@@ -45,6 +47,29 @@ export default function ForwardTest({ symbol }) {
       setPlaying(true);
       toast.success(`Forward-test ${period} · dati ${data.source === "real" ? "REALI" : "simulati"}`);
     } catch { toast.error("Errore avvio forward-test"); }
+    finally { setLoading(false); }
+  };
+
+  const runOptimize = async () => {
+    setOptLoading(true); setOpt(null);
+    const [, tf, bars] = PERIODS.find((p) => p[0] === period);
+    try {
+      const { data } = await api.post("/optimize", { symbol, timeframe: tf, bars: Math.max(400, bars), target_annual: 50 });
+      setOpt(data);
+      toast.success(`Ottimizzazione completata · ${data.combos_tested} config testate`);
+    } catch { toast.error("Ottimizzazione non riuscita (dati insufficienti)"); }
+    finally { setOptLoading(false); }
+  };
+
+  const applyOptimized = async () => {
+    if (!opt) return;
+    setLoading(true); setPlaying(false);
+    const [, tf, bars] = PERIODS.find((p) => p[0] === period);
+    try {
+      const { data } = await api.post("/forwardtest/run", { symbol, timeframe: tf, bars, params: opt.best_params, risk_percent: opt.recommended_risk_percent });
+      setRes(data); setIdx(data.warmup || 45); setPlaying(true);
+      toast.success("Config ottimizzata applicata al forward-test");
+    } catch { toast.error("Errore"); }
     finally { setLoading(false); }
   };
 
@@ -153,6 +178,58 @@ export default function ForwardTest({ symbol }) {
               <FastForward className="w-3.5 h-3.5" /> Salta alla fine
             </button>
           </>
+        )}
+      </div>
+
+      {/* Optimizer — target +50% annual */}
+      <div className="mb-3 rounded-lg border border-[#8B5CF6]/30 bg-[#8B5CF6]/5 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Target className="w-4 h-4 text-[#8B5CF6]" />
+            <span className="font-head font-bold text-sm">Ottimizzatore Rendita</span>
+            <span className="overline">obiettivo +50% annuo · {symbol}</span>
+          </div>
+          <button data-testid="optimizer-run-button" onClick={runOptimize} disabled={optLoading}
+            className="inline-flex items-center gap-1.5 bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+            {optLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Target className="w-3.5 h-3.5" />}
+            Trova la migliore config
+          </button>
+        </div>
+
+        {opt && (
+          <div className="mt-3 space-y-2 fade-up">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+              <Stat icon={TrendingUp} testid="optimizer-projected-annual" label="Rendita Annua Proiettata"
+                value={`${opt.projected_annual_return >= 0 ? "+" : ""}${opt.projected_annual_return}%`}
+                color={opt.projected_annual_return >= 0 ? "#10B981" : "#EF4444"} />
+              <Stat icon={Activity} label="Max DD Proiettato" value={`-${opt.projected_max_drawdown}%`} color="#EF4444" />
+              <Stat icon={Percent} label="Win Rate" value={`${opt.winrate}%`} color="#10B981" />
+              <Stat icon={Activity} label="Profit Factor" value={opt.profit_factor} color="#0EA5E9" />
+              <Stat icon={Layers} label="Operazioni" value={opt.trades} color="#94A3B8" />
+              <Stat icon={Target} label="Rischio/Trade" value={`${opt.recommended_risk_percent}%`} color="#F59E0B" />
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-[#94A3B8]">
+              <span>Config: <b className="text-white">{{ smc: "Smart Money", meanrev: "Mean-Reversion", breakout: "Breakout" }[opt.best_params.entry]}</b></span>
+              <span>TP <b className="text-[#10B981]">{opt.best_params.tp_mult}·ATR</b></span>
+              <span>SL <b className="text-[#EF4444]">{opt.best_params.sl_mult}·ATR</b></span>
+              <span>Filtro trend: <b className="text-white">{opt.best_params.trend_filter ? "ON" : "OFF"}</b></span>
+              <span className="text-[#64748B]">· {opt.combos_tested} config testate su {opt.days}g ({opt.source === "real" ? "dati reali" : "simulati"})</span>
+            </div>
+            <div className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/5 border border-[#F59E0B]/30 rounded-lg p-2.5 leading-relaxed">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                Questa è la config che <b>storicamente</b> avrebbe reso di più su ~{opt.days} giorni, dimensionando il rischio
+                al {opt.recommended_risk_percent}% per trade. La rendita annua è una <b>proiezione</b> ottenuta annualizzando un
+                periodo breve: c'è forte rischio di <b>overfitting</b> (ottimo sul passato, non garantito sul futuro). Nessun sistema
+                garantisce +50% annuo. Usalo come studio, non come promessa.
+              </span>
+            </div>
+            <button data-testid="optimizer-apply-button" onClick={applyOptimized} disabled={loading}
+              className="inline-flex items-center gap-1.5 bg-[#10B981] hover:bg-[#059669] text-[#05130D] text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+              {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+              Applica e riproduci nel forward-test
+            </button>
+          </div>
         )}
       </div>
 
