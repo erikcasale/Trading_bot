@@ -19,6 +19,7 @@ import bcrypt
 import jwt
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
+import metaapi_service
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -518,6 +519,151 @@ async def backtest(body: BacktestReq, user: dict = Depends(get_current_user)):
             "net_profit": net, "equity_curve": equity, "log": log}
 
 # ---------------------------------------------------------------------------
+# Forward-test (walk-forward) engine
+# ---------------------------------------------------------------------------
+def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, min_rr=1.5):
+    """Replay candles bar-by-bar applying Smart Money rules; returns trades,
+    equity curve and aggregate stats. Deterministic given the candle series."""
+    d = cfg["digits"]
+    start_equity = 10000.0
+    equity = start_equity
+    risk_amt = start_equity * risk_percent / 100.0
+    trades, equity_curve = [], []
+    open_trade = None
+    peak, max_dd = equity, 0.0
+    n = len(candles)
+
+    for i in range(n):
+        candle = candles[i]
+        # 1) manage the currently open trade
+        if open_trade:
+            hit = None
+            if open_trade["side"] == "BUY":
+                if candle["l"] <= open_trade["sl"]:
+                    hit = ("loss", open_trade["sl"])
+                elif candle["h"] >= open_trade["tp"]:
+                    hit = ("win", open_trade["tp"])
+            else:
+                if candle["h"] >= open_trade["sl"]:
+                    hit = ("loss", open_trade["sl"])
+                elif candle["l"] <= open_trade["tp"]:
+                    hit = ("win", open_trade["tp"])
+            if hit:
+                result, exit_price = hit
+                rr = abs(open_trade["tp"] - open_trade["entry"]) / max(
+                    abs(open_trade["entry"] - open_trade["sl"]), 1e-9)
+                pnl = round(risk_amt * (rr if result == "win" else -1.0), 2)
+                equity = round(equity + pnl, 2)
+                open_trade.update({"exit_index": i, "exit": round(exit_price, d),
+                                   "result": result, "pnl": pnl})
+                trades.append(open_trade)
+                open_trade = None
+
+        # 2) look for a new entry when flat and past warmup
+        if not open_trade and i >= warmup:
+            window = candles[max(0, i - warmup):i + 1]
+            zones = smart_money_zones(window, cfg)
+            price = candle["c"]
+            sig = protect = target = None
+            for b in zones["order_blocks"]:
+                if b["type"] == "bullish" and zones["bias"] != "bearish" \
+                        and b["bottom"] * 0.999 <= candle["l"] <= b["top"] * 1.001:
+                    sig, protect, target = "BUY", zones["recent_low"], zones["liquidity"]["buy_side"]
+                    break
+                if b["type"] == "bearish" and zones["bias"] != "bullish" \
+                        and b["bottom"] * 0.999 <= candle["h"] <= b["top"] * 1.001:
+                    sig, protect, target = "SELL", zones["recent_high"], zones["liquidity"]["sell_side"]
+                    break
+            # fallback entry: retest into a fresh fair value gap aligned with bias
+            if not sig:
+                for f in zones["fvg"]:
+                    if f["type"] == "bullish" and zones["bias"] != "bearish" \
+                            and f["bottom"] * 0.999 <= price <= f["top"] * 1.001:
+                        sig, protect, target = "BUY", zones["recent_low"], zones["liquidity"]["buy_side"]
+                        break
+                    if f["type"] == "bearish" and zones["bias"] != "bullish" \
+                            and f["bottom"] * 0.999 <= price <= f["top"] * 1.001:
+                        sig, protect, target = "SELL", zones["recent_high"], zones["liquidity"]["sell_side"]
+                        break
+            if sig:
+                entry = price
+                if sig == "BUY":
+                    sl = min(protect, entry - cfg["vol"] * 1.2)
+                    risk = entry - sl
+                    tp = max(target, entry + risk * min_rr)
+                else:
+                    sl = max(protect, entry + cfg["vol"] * 1.2)
+                    risk = sl - entry
+                    tp = min(target, entry - risk * min_rr)
+                if risk > 0:
+                    open_trade = {"entry_index": i, "side": sig, "entry": round(entry, d),
+                                  "sl": round(sl, d), "tp": round(tp, d)}
+
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak * 100 if peak else 0
+        max_dd = max(max_dd, dd)
+        equity_curve.append(round(equity, 2))
+
+    wins = sum(1 for t in trades if t["result"] == "win")
+    total = len(trades)
+    gross_win = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+    gross_loss = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+    pf = round(gross_win / gross_loss, 2) if gross_loss else (round(gross_win, 2) if gross_win else 0)
+    return {
+        "start_equity": start_equity, "final_equity": equity,
+        "trades": trades, "equity_curve": equity_curve,
+        "winrate": round(wins / total * 100, 1) if total else 0,
+        "total_trades": total, "wins": wins, "losses": total - wins,
+        "profit_factor": pf, "max_drawdown": round(max_dd, 2),
+        "net_profit": round(equity - start_equity, 2),
+    }
+
+
+class ForwardTestReq(BaseModel):
+    symbol: str
+    timeframe: str = "M15"
+    bars: int = 320
+    risk_percent: float = 1.0
+
+
+@api_router.get("/datasource/status")
+async def datasource_status(user: dict = Depends(get_current_user)):
+    return await metaapi_service.get_status()
+
+
+@api_router.post("/forwardtest/run")
+async def forwardtest_run(body: ForwardTestReq, user: dict = Depends(get_current_user)):
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    cfg = INSTRUMENTS[body.symbol]
+    bars = max(120, min(body.bars, 600))
+    real = await metaapi_service.fetch_candles(body.symbol, body.timeframe, bars)
+    if real and len(real) >= 80:
+        candles, source = real[-bars:], "real"
+    else:
+        candles, _ = generate_candles(body.symbol, body.timeframe, bars)
+        source = "simulated"
+    res = run_forward_test(candles, cfg, body.risk_percent)
+    return {"symbol": body.symbol, "timeframe": body.timeframe, "source": source,
+            "digits": cfg["digits"], "candles": candles, "warmup": 45, **res}
+
+
+class LiveOrderReq(BaseModel):
+    symbol: str
+    side: str
+    volume: float = 0.01
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+
+
+@api_router.post("/forwardtest/execute-live")
+async def execute_live(body: LiveOrderReq, user: dict = Depends(get_current_user)):
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    return await metaapi_service.place_market_order(body.symbol, body.side, body.volume, body.sl, body.tp)
+
+
+# ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
@@ -536,6 +682,11 @@ async def startup():
             await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pw)}})
         await ensure_user_state(str(existing["_id"]))
     logger.info("Apex Flow ready.")
+    try:
+        import asyncio
+        asyncio.create_task(metaapi_service.check_connected(force=True))
+    except Exception:
+        pass
 
 
 @app.on_event("shutdown")

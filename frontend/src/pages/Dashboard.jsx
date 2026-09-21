@@ -6,6 +6,7 @@ import CandleChart from "@/components/CandleChart";
 import AiPanel from "@/components/AiPanel";
 import BotPanel from "@/components/BotPanel";
 import BacktestPanel from "@/components/BacktestPanel";
+import ForwardTest from "@/components/ForwardTest";
 import PositionsTable from "@/components/PositionsTable";
 
 export default function Dashboard() {
@@ -53,6 +54,10 @@ export default function Dashboard() {
           <div className="lg:col-span-3 space-y-4">
             <AiPanel symbol={symbol} onAnalysis={handleAnalysis} />
             <BotPanel bot={bot} onRefresh={loadBot} />
+          </div>
+
+          <div className="lg:col-span-12">
+            <ForwardTest symbol={symbol} />
           </div>
 
           <div className="lg:col-span-12">
