@@ -11,6 +11,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 import logging
+import asyncio
 import uuid
 import json
 import math
@@ -767,8 +768,18 @@ async def optimize(body: OptimizeReq, user: dict = Depends(get_current_user)):
     else:
         candles, _ = generate_candles(body.symbol, body.timeframe, bars)
         source = "simulated"
-    days = _period_days(candles, body.timeframe)
+    # heavy grid search runs off the event loop so it never blocks other requests
+    result = await asyncio.to_thread(_optimize_compute, candles, cfg, body.timeframe,
+                                     body.target_annual, body.max_dd)
+    if result is None:
+        raise HTTPException(status_code=422, detail="Dati insufficienti per l'ottimizzazione")
+    result.update({"symbol": body.symbol, "source": source,
+                   "period_start": candles[0]["time"], "period_end": candles[-1]["time"]})
+    return result
 
+
+def _optimize_compute(candles, cfg, timeframe, target_annual, max_dd):
+    days = _period_days(candles, timeframe)
     best = None
     tested = 0
     for entry in ("smc", "meanrev", "breakout"):
@@ -791,33 +802,30 @@ async def optimize(body: OptimizeReq, user: dict = Depends(get_current_user)):
                             "score": score}
                     if best is None or cand["score"] > best["score"]:
                         best = cand
-
     if best is None:
-        raise HTTPException(status_code=422, detail="Dati insufficienti per l'ottimizzazione")
+        return None
 
     annual_1pct = best["annual_1pct"]
     dd_1pct = max(best["dd_1pct"], 0.1)
     if annual_1pct <= 0:
         recommended_risk, projected_annual, projected_dd, reached = 1.0, annual_1pct, dd_1pct, False
     else:
-        risk_for_target = body.target_annual / annual_1pct
-        risk_for_dd = body.max_dd / dd_1pct
+        risk_for_target = target_annual / annual_1pct
+        risk_for_dd = max_dd / dd_1pct
         recommended_risk = round(max(0.25, min(5.0, risk_for_target, risk_for_dd)), 2)
         projected_annual = round(annual_1pct * recommended_risk, 1)
         projected_dd = round(dd_1pct * recommended_risk, 1)
-        reached = projected_annual >= body.target_annual * 0.999
+        reached = projected_annual >= target_annual * 0.999
 
     final = run_forward_test(candles, cfg, recommended_risk, params=best["params"])
     return {
-        "symbol": body.symbol, "timeframe": body.timeframe, "source": source,
-        "days": round(days, 1), "combos_tested": tested,
-        "period_start": candles[0]["time"], "period_end": candles[-1]["time"],
+        "timeframe": timeframe, "days": round(days, 1), "combos_tested": tested,
         "best_params": best["params"], "winrate": best["winrate"],
         "profit_factor": best["profit_factor"], "trades": best["trades"],
         "annual_at_1pct": annual_1pct, "dd_at_1pct": best["dd_1pct"],
         "recommended_risk_percent": recommended_risk,
         "projected_annual_return": projected_annual, "projected_max_drawdown": projected_dd,
-        "target_annual": body.target_annual, "target_reached": reached,
+        "target_annual": target_annual, "target_reached": reached,
         "final_equity": final["true_equity"], "realized_net": final["realized_net"],
         "equity_curve": final["equity_curve"],
     }

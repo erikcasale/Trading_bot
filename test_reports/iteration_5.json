@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 5 — thorough regression + verification of new forex majors (USD/CHF, USD/CAD, AUD/USD) and metaapi_service.fetch_candles retry/reconnect reliability. Added /app/backend/tests/test_new_pairs.py (23 tests) — 23/23 pass after fixing assertion path for AI (fields live under response.analysis). Real-data reliability: USD/CHF, USD/CAD, AUD/USD each returned source='real' 3/3 runs of /api/forwardtest/run. Watchlist has exactly 11 instruments incl. all 5 majors. Optimizer works for all 5 forex majors (real source, combos_tested>0). Frontend end-to-end passes: demo login -> USD/CHF chart -> AI SELL 1:3.1 -> Ottimizzatore -> Rendita Annua Proiettata +50% -> Applica e riproduci -> Senza SL mode -> Anno period -> AUD/USD backtest (WR 96.5%, +€62,119) -> open positions -> logout -> /login, and wrong password shows error. Existing test_forwardtest.py and test_optimize.py: 15/18 pass; 3 intermittent 502s from Cloudflare edge under parallel load (backend logs show all 200 OKs when re-run sequentially).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/forwardtest/run (BTC/USDT)", "issue": "Intermittent Cloudflare 502 (edge) under xdist parallel load; backend itself logs 200 OK. Not a backend bug, but consider rate-limiting protection or a longer edge timeout for long-running requests."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_new_pairs.py",
+    "/app/backend/tests/test_forwardtest.py",
+    "/app/backend/tests/test_optimize.py",
+    "/app/test_reports/pytest/pytest_iter5.xml",
+    "/app/test_reports/pytest/pytest_iter5_regression.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py monolith is growing (auth, market, AI, bot, positions, backtest, forwardtest, optimizer, datasource). Consider splitting into routers/services modules (>700 lines).",
+    "Optimizer grid ~72 combos runs sequentially inside async endpoint — 5–15s CPU work can block the loop; use asyncio.to_thread / run_in_executor.",
+    "Add per-endpoint request timeout guard: long optimize/forwardtest calls occasionally trip Cloudflare 502 under concurrent parallel test load.",
+    "AI /api/ai/analysis nests {bias, score, narrative, setup} inside `analysis` while zones is top-level — document the schema or flatten to reduce client-side branching."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_new_pairs.py"
+  ],
+  "success_rate": {"backend": "100% new-suite (23/23); regression 83% (15/18) with 3 transient 502s, all 200 OK on retry", "frontend": "100% (all 13 flows verified incl. wrong-password error, logout redirect, new-pair chart/AI/optimizer/backtest)"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None — used seeded demo account.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_new_pairs.py fully covers new majors: watchlist size (11), candles, real-data reliability (3x per pair, requires >=2/3 real), all 3 modes for USD/CHF & AUD/USD, optimizer across all 5 majors, optimizer-apply passthrough (mode='optimized'), AI analysis (fields nested under response.analysis), annual D1 period, and 404 error paths. Regression tests hit 502 only under parallel load — rerun sequentially or with -p no:xdist for stable runs. Frontend E2E confirmed testids: login-demo-submit-button, market-watchlist-item-{usdchf,audusd}, ai-run-analysis-button, optimizer-run-button, optimizer-projected-annual, optimizer-apply-button, forwardtest-mode-nosl, forwardtest-period-Anno, forwardtest-run-button, forwardtest-trades-table, backtest-run-button, open-positions-table, logout-button — all present and functional.",
+  "rca of the issue": "No production bug. The only test failures were Cloudflare 502s on parallel long-running requests, not backend errors."
+}
