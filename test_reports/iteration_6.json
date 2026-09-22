@@ -1,0 +1,23 @@
+{
+  "summary": "Iteration 6 — verified /api/optimize asyncio.to_thread fix (event-loop no longer blocked). New suite /app/backend/tests/test_optimize_concurrency.py: 11/11 PASS in 43.45s. Concurrency test fired ONE optimize (EUR/USD H1 bars=700) that ran 4.29s; mid-flight, 3x GET /api/datasource/status returned in 494ms / 112ms / 128ms, and GET /api/market/watchlist in 146ms — all well under the 2s SLA, proving the loop is not blocked. Full schema validated for USD/CAD, USD/CHF, EUR/USD (H1, bars=600, target_annual=50): combos_tested==72 for all three, source='real' for all three, all 16 required keys present, recommended_risk_percent in [0.25,5], projected_annual_return near target (~49-50). Invalid symbol -> 404 confirmed. Insufficient-data path (EUR/USD M5 bars=200) returned gracefully (200 in this run — no 500). Forwardtest presets balanced / highwinrate / nosl all 200 with correct mode echo. Explicit params -> mode='optimized' with entry_time/exit_time on trades. Watchlist has exactly 11 items including the 5 forex majors (EUR/USD, USD/JPY, GBP/USD, USD/CHF, USD/CAD, AUD/USD).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_optimize_concurrency.py",
+    "/app/test_reports/pytest/pytest_iter6.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Concurrency fix (asyncio.to_thread + _optimize_compute sync helper) is correctly applied at server.py:772. Grid remains 3x4x3x2 = 72 combos as documented.",
+    "server.py still a growing monolith; consider splitting into routers/services in a future refactor (not blocking).",
+    "Consider also wrapping /api/forwardtest/run and /api/backtest/run in asyncio.to_thread for the same reason (they also do CPU-bound simulation) — long presets could exhibit similar blocking under load."
+  ],
+  "updated_files": ["/app/backend/tests/test_optimize_concurrency.py"],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "skipped per request"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_optimize_concurrency.py is the definitive regression for the asyncio.to_thread fix. Run sequentially with -p no:xdist (or -o addopts='' to override pytest.ini which forces xdist). The concurrency test asserts: (a) optimize duration > 1s to be a meaningful test, (b) each concurrent short call < 2s. Measured latencies in this run: 112-494ms while optimize ran 4.29s. If test_optimize_insufficient_data_graceful ever returns 500 instead of 200/422, that's a regression.",
+  "rca of the issue": "N/A — fix verified working. Prior iterations 1-5 all passed; iteration 5 flagged the CPU-bound optimizer as blocking risk (recommendation #2). Main agent applied asyncio.to_thread wrapping, and this iteration measured concurrent short-call latency during an in-flight optimize to prove non-blocking behavior."
+}
