@@ -113,40 +113,78 @@ async def _ensure_rpc():
     return conn
 
 
+async def _fetch_page(sym, tf, start_time, limit):
+    """One backward page from the broker (candles with time < start_time)."""
+    account = _state["account"]
+    if account is None:
+        await _ensure_rpc()
+        account = _state["account"]
+    rows = await asyncio.wait_for(
+        account.get_historical_candles(symbol=sym, timeframe=tf, start_time=start_time, limit=limit),
+        timeout=45,
+    )
+    return rows or []
+
+
+def _norm(rows):
+    out = []
+    for r in rows:
+        t = r.get("time")
+        out.append({
+            "time": t.isoformat() if hasattr(t, "isoformat") else str(t),
+            "o": r.get("open"), "h": r.get("high"),
+            "l": r.get("low"), "c": r.get("close"),
+            "v": r.get("tickVolume", r.get("volume", 0)),
+            "_t": t,
+        })
+    return out
+
+
 async def fetch_candles(symbol: str, timeframe: str, n: int):
-    """Return list of {time,o,h,l,c,v} from the broker, or None if unavailable.
-    Retries once with a fresh RPC connection on timeout/error (the first RPC
-    historical call after a re-sync is occasionally slow)."""
+    """Return up to `n` candles {time,o,h,l,c,v} from the broker (or None).
+
+    Loads history in backward pages (MetaApi caps a single call at ~1000
+    candles) so multi-year windows (e.g. 5 years of D1) can be assembled.
+    Retries once with a fresh RPC connection on timeout/error."""
     if not await check_connected():
         return None
     sym = SYMBOL_MAP.get(symbol, symbol.replace("/", ""))
     tf = TF_MAP.get(timeframe, "15m")
     for attempt in range(2):
         try:
-            account = _state["account"]
-            if account is None:
-                await _ensure_rpc()
-                account = _state["account"]
-            rows = await asyncio.wait_for(
-                account.get_historical_candles(symbol=sym, timeframe=tf, start_time=None, limit=min(n, 1000)),
-                timeout=45,
-            )
-            if not rows:
+            collected = []
+            start_time = None
+            seen = set()
+            # page backward until we have `n` candles or the broker runs dry
+            for _ in range(12):
+                limit = min(1000, n - len(collected)) if n > len(collected) else 1000
+                if limit <= 0:
+                    break
+                rows = await _fetch_page(sym, tf, start_time, min(1000, limit))
+                if not rows:
+                    break
+                page = _norm(rows)
+                page.sort(key=lambda x: x["time"])
+                new = [c for c in page if c["time"] not in seen]
+                if not new:
+                    break
+                for c in new:
+                    seen.add(c["time"])
+                collected = new + collected
+                if len(rows) < 900 or len(collected) >= n:
+                    break
+                # next page ends just before the earliest candle we have
+                earliest = page[0]["_t"]
+                start_time = earliest
+            if not collected:
                 if attempt == 0:
-                    _state["connection"] = None  # force reconnect and retry
+                    _state["connection"] = None
                     continue
                 return None
-            out = []
-            for r in rows:
-                t = r.get("time")
-                out.append({
-                    "time": t.isoformat() if hasattr(t, "isoformat") else str(t),
-                    "o": r.get("open"), "h": r.get("high"),
-                    "l": r.get("low"), "c": r.get("close"),
-                    "v": r.get("tickVolume", r.get("volume", 0)),
-                })
-            out.sort(key=lambda x: x["time"])
-            return out
+            collected.sort(key=lambda x: x["time"])
+            for c in collected:
+                c.pop("_t", None)
+            return collected[-n:]
         except Exception as e:
             _state["last_error"] = str(e)[:220]
             logger.warning(f"MetaApi fetch_candles attempt {attempt} failed: {e}")

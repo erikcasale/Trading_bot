@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { LineChart, Line, YAxis, ResponsiveContainer, Tooltip } from "recharts";
-import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target } from "lucide-react";
+import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target, Brain, CheckCircle2, XCircle } from "lucide-react";
 
 const PERIODS = [
   ["Settimana", "M15", 480],
@@ -33,10 +33,55 @@ export default function ForwardTest({ symbol }) {
   const [optLoading, setOptLoading] = useState(false);
   const [oos, setOos] = useState(null);
   const [oosLoading, setOosLoading] = useState(false);
+  const [disc, setDisc] = useState(null);
+  const [discLoading, setDiscLoading] = useState(false);
+  const discPoll = useRef(null);
   const timer = useRef(null);
 
   useEffect(() => { api.get("/datasource/status").then((r) => setDs(r.data)).catch(() => {}); }, []);
-  useEffect(() => { setRes(null); setPlaying(false); setIdx(0); setOpt(null); setOos(null); }, [symbol]);
+  useEffect(() => {
+    setRes(null); setPlaying(false); setIdx(0); setOpt(null); setOos(null); setDisc(null);
+    if (discPoll.current) clearInterval(discPoll.current);
+  }, [symbol]);
+  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); }, []);
+
+  const runDiscover = async () => {
+    setDiscLoading(true); setDisc(null);
+    if (discPoll.current) clearInterval(discPoll.current);
+    try {
+      const { data } = await api.post("/strategy/discover", { symbol, years: 5, target_annual: 50 });
+      const jobId = data.job_id;
+      let ticks = 0;
+      discPoll.current = setInterval(async () => {
+        ticks += 1;
+        try {
+          const { data: st } = await api.get(`/strategy/discover/${jobId}`);
+          if (st.status === "done") {
+            clearInterval(discPoll.current); setDisc(st.result); setDiscLoading(false);
+            const v = st.result.verdict;
+            toast[v === "profittevole" ? "success" : v === "marginale" ? "message" : "error"](
+              `Strategia: ${v.toUpperCase()} nell'ultimo anno`);
+          } else if (st.status === "error" || ticks > 60) {
+            clearInterval(discPoll.current); setDiscLoading(false);
+            toast.error(st.error || "Apprendimento non riuscito");
+          }
+        } catch { /* keep polling */ }
+      }, 3000);
+    } catch { setDiscLoading(false); toast.error("Impossibile avviare l'apprendimento"); }
+  };
+
+  const applyDiscovered = async () => {
+    if (!disc) return;
+    setLoading(true); setPlaying(false); setPeriod("Anno");
+    try {
+      const { data } = await api.post("/forwardtest/run", {
+        symbol, timeframe: "D1", bars: 365, params: disc.best_params,
+        risk_percent: disc.recommended_risk_percent });
+      setRes(data); setIdx(data.warmup || 45); setPlaying(true);
+      toast.success("Strategia appresa applicata all'ultimo anno");
+    } catch { toast.error("Errore"); }
+    finally { setLoading(false); }
+  };
 
   const run = async () => {
     setLoading(true); setPlaying(false);
@@ -185,6 +230,98 @@ export default function ForwardTest({ symbol }) {
               <FastForward className="w-3.5 h-3.5" /> Salta alla fine
             </button>
           </>
+        )}
+      </div>
+
+      {/* Strategy discovery — learn on 5y, validate on last 12 months */}
+      <div data-testid="discover-panel" className="mb-3 rounded-lg border border-[#0EA5E9]/40 bg-[#0EA5E9]/5 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Brain className="w-4 h-4 text-[#0EA5E9]" />
+            <span className="font-head font-bold text-sm">Apprendi Strategia · 5 anni</span>
+            <span className="overline">D1 · valida sull'ULTIMO ANNO · {symbol}</span>
+          </div>
+          <button data-testid="discover-run-button" onClick={runDiscover} disabled={discLoading}
+            className="inline-flex items-center gap-1.5 bg-[#0EA5E9] hover:bg-[#0284C7] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+            {discLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Brain className="w-3.5 h-3.5" />}
+            {discLoading ? "Apprendimento in corso…" : "Analizza 5 anni & trova strategia"}
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
+          Analizza <b className="text-white">~5 anni</b> di grafico giornaliero Tickmill, cerca la logica migliore
+          (Smart Money, Mean-Reversion, Breakout, Trend-Following + filtro RSI) sui primi 4 anni, poi la <b className="text-white">verifica sugli ultimi 12 mesi mai visti</b>.
+          Una strategia è valida solo se resta <b className="text-[#10B981]">in profitto nell'ultimo anno</b>.
+          {discLoading && <span className="text-[#0EA5E9]"> Può richiedere fino a ~40s (scarico storico + ricerca).</span>}
+        </p>
+
+        {disc && (
+          <div data-testid="discover-result" className="mt-3 space-y-2 fade-up">
+            <div className="flex flex-wrap items-center gap-2">
+              <span data-testid="discover-verdict-badge"
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                  disc.verdict === "profittevole" ? "border-[#10B981]/50 bg-[#10B981]/10 text-[#10B981]"
+                  : disc.verdict === "marginale" ? "border-[#F59E0B]/50 bg-[#F59E0B]/10 text-[#F59E0B]"
+                  : "border-[#EF4444]/50 bg-[#EF4444]/10 text-[#EF4444]"}`}>
+                {disc.verdict === "profittevole" ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                {disc.verdict === "profittevole" ? "PROFITTEVOLE (ultimo anno)"
+                  : disc.verdict === "marginale" ? "MARGINALE" : "NESSUN EDGE (ultimo anno)"}
+              </span>
+              <span className="text-[11px] font-mono text-[#94A3B8]">
+                {fmtDate(disc.period_start, false)} → {fmtDate(disc.period_end, false)} · {disc.combos_tested} config testate ({disc.source === "real" ? "dati reali" : "simulati"})
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-[#94A3B8]">
+              <span>Strategia: <b className="text-white">{disc.entry_label}</b></span>
+              <span>TP <b className="text-[#10B981]">{disc.best_params.tp_mult}·ATR</b></span>
+              <span>SL <b className="text-[#EF4444]">{disc.best_params.sl_mult}·ATR</b></span>
+              <span>Trend: <b className="text-white">{disc.best_params.trend_filter ? "ON" : "OFF"}</b></span>
+              <span>RSI: <b className="text-white">{disc.best_params.rsi ? "ON" : "OFF"}</b></span>
+              <span>Rischio/trade: <b className="text-[#F59E0B]">{disc.recommended_risk_percent}%</b></span>
+              <span>Proiezione annua: <b className={disc.projected_annual_return >= 0 ? "text-up" : "text-down"}>{disc.projected_annual_return >= 0 ? "+" : ""}{disc.projected_annual_return}%</b></span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {[["Apprendimento (primi 4 anni)", disc.training, "#0EA5E9"],
+                ["Ultimo anno (mai visto)", disc.last_year, disc.last_year.net > 0 ? "#10B981" : "#EF4444"]].map(([label, seg, col], k) => (
+                <div key={k} data-testid={`discover-seg-${k}`} className="rounded-lg border border-[#1E293B] bg-[#0B0E17] p-2.5">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="overline" style={{ color: col }}>{label}</span>
+                    <span className="text-[10px] font-mono text-[#64748B]">{fmtDate(seg.period_start, false)} → {fmtDate(seg.period_end, false)}</span>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1 font-mono text-[11px] mb-1">
+                    <Mini label="WR" value={`${seg.winrate}%`} />
+                    <Mini label="PF" value={seg.profit_factor} color={seg.profit_factor >= 1 ? "#10B981" : "#EF4444"} />
+                    <Mini label="Annua" value={`${seg.annual_return}%`} color={seg.annual_return >= 0 ? "#10B981" : "#EF4444"} />
+                    <Mini label="Net" value={`€${seg.net}`} color={seg.net >= 0 ? "#10B981" : "#EF4444"} />
+                    <Mini label="Trade" value={seg.trades} />
+                  </div>
+                  <ResponsiveContainer width="100%" height={70}>
+                    <LineChart data={seg.equity_curve.map((e, i) => ({ i, e }))}>
+                      <YAxis domain={["dataMin", "dataMax"]} hide />
+                      <Line type="monotone" dataKey="e" stroke={col} strokeWidth={1.6} dot={false} isAnimationActive={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ))}
+            </div>
+
+            <div className={`flex items-start gap-2 text-[11px] rounded-lg p-2.5 leading-relaxed border ${
+              disc.verdict === "profittevole" ? "text-[#10B981] bg-[#10B981]/5 border-[#10B981]/30"
+              : disc.verdict === "marginale" ? "text-[#F59E0B] bg-[#F59E0B]/5 border-[#F59E0B]/30"
+              : "text-[#EF4444] bg-[#EF4444]/8 border-[#EF4444]/40"}`}>
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{disc.verdict_text} La logica è stata scelta SOLO sui primi 4 anni e verificata, senza modifiche, sull'ultimo anno. Le performance passate non garantiscono risultati futuri.</span>
+            </div>
+
+            {disc.verdict !== "non_profittevole" && (
+              <button data-testid="discover-apply-button" onClick={applyDiscovered} disabled={loading}
+                className="inline-flex items-center gap-1.5 bg-[#10B981] hover:bg-[#059669] text-[#05130D] text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+                {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                Applica e riproduci l'ultimo anno
+              </button>
+            )}
+          </div>
         )}
       </div>
 

@@ -15,6 +15,7 @@ import asyncio
 import uuid
 import json
 import math
+import time
 import random
 import bcrypt
 import jwt
@@ -530,6 +531,26 @@ MODE_PRESETS = {
 }
 
 
+def _rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return 50.0
+    gains = losses = 0.0
+    for j in range(-period, 0):
+        diff = closes[j] - closes[j - 1]
+        if diff >= 0:
+            gains += diff
+        else:
+            losses -= diff
+    if losses == 0:
+        return 100.0
+    rs = (gains / period) / (losses / period)
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def _mean(seq):
+    return sum(seq) / len(seq) if seq else 0.0
+
+
 def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced", params=None):
     """Replay candles bar-by-bar; returns trades, mark-to-market equity and stats.
     Entry/exit driven by `params` (or the 'balanced' Smart Money preset).
@@ -602,6 +623,15 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced",
                         sig = "BUY"
                     elif prev["c"] > prev["o"] and candle["c"] < candle["o"] and candle["c"] < prev["l"]:
                         sig = "SELL"
+            elif entry_mode == "trend":
+                closes = [c["c"] for c in window]
+                if len(closes) >= 31:
+                    fast_now, slow_now = _mean(closes[-10:]), _mean(closes[-30:])
+                    fast_prev, slow_prev = _mean(closes[-11:-1]), _mean(closes[-31:-1])
+                    if fast_prev <= slow_prev and fast_now > slow_now:
+                        sig = "BUY"
+                    elif fast_prev >= slow_prev and fast_now < slow_now:
+                        sig = "SELL"
             else:  # smc
                 zones = smart_money_zones(window, cfg)
                 for b in zones["order_blocks"]:
@@ -632,6 +662,12 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced",
                 if sig == "BUY" and price < sma:
                     sig = None
                 elif sig == "SELL" and price > sma:
+                    sig = None
+            if sig and p.get("rsi"):
+                r = _rsi([c["c"] for c in window], 14)
+                if sig == "BUY" and r < 50:
+                    sig = None
+                elif sig == "SELL" and r > 50:
                     sig = None
             tp_mult, sl_mult = p["tp_mult"], p["sl_mult"]
 
@@ -901,6 +937,184 @@ def _optimize_oos_compute(candles, cfg, timeframe, target_annual, max_dd, split)
     }
 
 
+
+
+class DiscoverReq(BaseModel):
+    symbol: str
+    years: int = 5
+    target_annual: float = 50.0
+    max_dd: float = 40.0
+
+
+_discover_jobs = {}
+_d1_cache = {}
+
+DISCOVER_GRID = [
+    (entry, tp, sl, tfil, rsi)
+    for entry in ("smc", "meanrev", "breakout", "trend")
+    for tp in (1.0, 1.5, 2.0, 3.0)
+    for sl in (1.0, 1.5, 2.5)
+    for tfil in (True, False)
+    for rsi in (True, False)
+]
+
+
+@api_router.post("/strategy/discover")
+async def strategy_discover(body: DiscoverReq, user: dict = Depends(get_current_user)):
+    """Kick off strategy learning as a background job (the D1 history fetch +
+    grid search can exceed the 60s ingress limit). Returns a job id to poll."""
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    job_id = str(uuid.uuid4())
+    _discover_jobs[job_id] = {"status": "running", "result": None, "error": None,
+                              "started": datetime.now(timezone.utc).isoformat()}
+    asyncio.create_task(_run_discover(job_id, body))
+    return {"job_id": job_id, "status": "running"}
+
+
+@api_router.get("/strategy/discover/{job_id}")
+async def strategy_discover_status(job_id: str, user: dict = Depends(get_current_user)):
+    job = _discover_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job non trovato")
+    return job
+
+
+async def _get_d1_history(symbol: str, want: int):
+    key = symbol
+    now = time.time()
+    hit = _d1_cache.get(key)
+    if hit and (now - hit[0]) < 600 and len(hit[1]) >= want * 0.9:
+        return hit[1], "real"
+    real = await metaapi_service.fetch_candles(symbol, "D1", want)
+    if real and len(real) >= 400:
+        _d1_cache[key] = (now, real)
+        return real, "real"
+    candles, _ = generate_candles(symbol, "D1", want)
+    return candles, "simulated"
+
+
+async def _run_discover(job_id: str, body: "DiscoverReq"):
+    try:
+        cfg = INSTRUMENTS[body.symbol]
+        years = max(2, min(body.years, 8))
+        want = int(years * 260) + 40  # ~260 trading days/yr on D1
+        candles, source = await _get_d1_history(body.symbol, want)
+        result = await asyncio.to_thread(_discover_compute, candles, cfg,
+                                         body.target_annual, body.max_dd)
+        if result is None:
+            _discover_jobs[job_id] = {"status": "error", "result": None,
+                                      "error": "Storico insufficiente per l'apprendimento"}
+            return
+        result.update({"symbol": body.symbol, "source": source, "years": years})
+        _discover_jobs[job_id] = {"status": "done", "result": result, "error": None}
+    except Exception as e:
+        logger.exception("discover job failed")
+        _discover_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:220]}
+
+
+def _discover_compute(candles, cfg, target_annual, max_dd):
+    # split: last 365 days = validation (unseen), the rest = training
+    try:
+        last_ts = datetime.fromisoformat(str(candles[-1]["time"]).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    cutoff = last_ts - timedelta(days=365)
+    val_start = None
+    for i, c in enumerate(candles):
+        try:
+            t = datetime.fromisoformat(str(c["time"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if t >= cutoff:
+            val_start = i
+            break
+    if val_start is None or val_start < 150 or (len(candles) - val_start) < 30:
+        return None
+    train, val = candles[:val_start], candles[val_start:]
+    train_days, val_days = _period_days(train, "D1"), _period_days(val, "D1")
+
+    def annual(res, days):
+        return res["realized_net"] / res["start_equity"] * 100 * (365.0 / max(days, 1.0))
+
+    # 1) rank every config on the TRAINING window (first N-1 years)
+    ranked = []
+    for entry, tp, sl, tfil, rsi in DISCOVER_GRID:
+        params = {"entry": entry, "tp_mult": tp, "sl_mult": sl, "trend_filter": tfil, "rsi": rsi}
+        tr = run_forward_test(train, cfg, 1.0, params=params)
+        if tr["total_trades"] < 10:
+            continue
+        ta = annual(tr, train_days)
+        dd = max(tr["max_drawdown"], 0.1)
+        good = tr["profit_factor"] >= 1.05 and ta > 0
+        score = (ta / dd) if good else (-1e6 + ta)
+        ranked.append((score, params, tr, ta))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda x: -x[0])
+
+    # 2) validate the strongest training configs on the UNSEEN last 12 months
+    best = None
+    for _, params, tr, ta in ranked[:20]:
+        vr = run_forward_test(val, cfg, 1.0, params=params)
+        va = annual(vr, val_days)
+        valid = vr["realized_net"] > 0 and vr["profit_factor"] >= 1.1 and vr["total_trades"] >= 5
+        rank = (1 if valid else 0, va / max(vr["max_drawdown"], 0.1), va)
+        cand = {"params": params, "tr": tr, "ta": ta, "vr": vr, "va": va,
+                "valid": valid, "rank": rank}
+        if best is None or cand["rank"] > best["rank"]:
+            best = cand
+    if best is None:
+        return None
+
+    params, tr, vr = best["params"], best["tr"], best["vr"]
+    va_1pct = best["va"]
+    val_dd = max(vr["max_drawdown"], 0.1)
+    # size risk toward the annual target using LAST-YEAR performance, capped by DD
+    if va_1pct <= 0:
+        rec_risk, proj_annual, proj_dd = 1.0, va_1pct, val_dd
+    else:
+        rec_risk = round(max(0.25, min(5.0, target_annual / va_1pct, max_dd / val_dd)), 2)
+        proj_annual = round(va_1pct * rec_risk, 1)
+        proj_dd = round(val_dd * rec_risk, 1)
+
+    if best["valid"]:
+        verdict = "profittevole"
+        vtext = "Strategia in PROFITTO negli ultimi 12 mesi (dati non usati per l'apprendimento): edge concreto, ma non una garanzia futura."
+    elif vr["realized_net"] > 0:
+        verdict = "marginale"
+        vtext = "Ultimi 12 mesi leggermente positivi ma con margine sottile (PF<1.1): edge debole, meglio validare più a lungo prima di rischiare."
+    else:
+        verdict = "non_profittevole"
+        vtext = "Nessuna configurazione è risultata profittevole nell'ultimo anno su questo strumento: questa è la migliore trovata, ma NON va tradata così — cambia strumento o timeframe."
+
+    full = run_forward_test(candles, cfg, rec_risk, params=params)
+    entry_label = {"smc": "Smart Money", "meanrev": "Mean-Reversion",
+                   "breakout": "Breakout", "trend": "Trend-Following (MA cross)"}[params["entry"]]
+    return {
+        "verdict": verdict, "verdict_text": vtext,
+        "best_params": params, "entry_label": entry_label,
+        "recommended_risk_percent": rec_risk,
+        "projected_annual_return": proj_annual, "projected_max_drawdown": proj_dd,
+        "target_annual": target_annual, "combos_tested": len(ranked),
+        "training": {
+            "days": round(train_days, 1), "winrate": tr["winrate"],
+            "profit_factor": tr["profit_factor"], "trades": tr["total_trades"],
+            "annual_return": round(best["ta"], 1), "net": tr["realized_net"],
+            "max_drawdown": tr["max_drawdown"], "equity_curve": tr["equity_curve"],
+            "period_start": train[0]["time"], "period_end": train[-1]["time"],
+        },
+        "last_year": {
+            "days": round(val_days, 1), "winrate": vr["winrate"],
+            "profit_factor": vr["profit_factor"], "trades": vr["total_trades"],
+            "annual_return": round(va_1pct, 1), "net": vr["realized_net"],
+            "max_drawdown": vr["max_drawdown"], "equity_curve": vr["equity_curve"],
+            "period_start": val[0]["time"], "period_end": val[-1]["time"],
+        },
+        "full_equity_curve": full["equity_curve"],
+        "full_net": full["realized_net"], "full_final_equity": full["true_equity"],
+        "period_start": candles[0]["time"], "period_end": candles[-1]["time"],
+    }
 
 
 class LiveOrderReq(BaseModel):
