@@ -32,10 +32,12 @@ export default function ForwardTest({ symbol }) {
   const [ds, setDs] = useState(null);
   const [opt, setOpt] = useState(null);
   const [optLoading, setOptLoading] = useState(false);
+  const [oos, setOos] = useState(null);
+  const [oosLoading, setOosLoading] = useState(false);
   const timer = useRef(null);
 
   useEffect(() => { api.get("/datasource/status").then((r) => setDs(r.data)).catch(() => {}); }, []);
-  useEffect(() => { setRes(null); setPlaying(false); setIdx(0); setOpt(null); }, [symbol]);
+  useEffect(() => { setRes(null); setPlaying(false); setIdx(0); setOpt(null); setOos(null); }, [symbol]);
 
   const run = async () => {
     setLoading(true); setPlaying(false);
@@ -71,6 +73,18 @@ export default function ForwardTest({ symbol }) {
       toast.success("Config ottimizzata applicata al forward-test");
     } catch { toast.error("Errore"); }
     finally { setLoading(false); }
+  };
+
+  const runOos = async () => {
+    setOosLoading(true); setOos(null);
+    const [, tf] = PERIODS.find((p) => p[0] === period);
+    try {
+      const { data } = await api.post("/optimize/oos", { symbol, timeframe: tf, bars: 800, split: 0.7, target_annual: 50 });
+      setOos(data);
+      toast[data.verdict === "robusta" ? "success" : data.verdict === "fragile" ? "error" : "message"](
+        `Validazione OOS: strategia ${data.verdict.toUpperCase()}`);
+    } catch { toast.error("Validazione OOS non riuscita (dati insufficienti)"); }
+    finally { setOosLoading(false); }
   };
 
   useEffect(() => {
@@ -189,11 +203,18 @@ export default function ForwardTest({ symbol }) {
             <span className="font-head font-bold text-sm">Ottimizzatore Rendita</span>
             <span className="overline">obiettivo +50% annuo · {symbol}</span>
           </div>
-          <button data-testid="optimizer-run-button" onClick={runOptimize} disabled={optLoading}
-            className="inline-flex items-center gap-1.5 bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
-            {optLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Target className="w-3.5 h-3.5" />}
-            Trova la migliore config
-          </button>
+          <div className="flex items-center gap-2">
+            <button data-testid="optimizer-run-button" onClick={runOptimize} disabled={optLoading}
+              className="inline-flex items-center gap-1.5 bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+              {optLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Target className="w-3.5 h-3.5" />}
+              Trova la migliore config
+            </button>
+            <button data-testid="optimizer-oos-button" onClick={runOos} disabled={oosLoading}
+              className="inline-flex items-center gap-1.5 bg-[#131A24] hover:bg-[#1A2332] border border-[#8B5CF6]/50 text-[#8B5CF6] text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+              {oosLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CalendarRange className="w-3.5 h-3.5" />}
+              Validazione Out-of-Sample
+            </button>
+          </div>
         </div>
 
         {opt && (
@@ -229,6 +250,60 @@ export default function ForwardTest({ symbol }) {
               {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
               Applica e riproduci nel forward-test
             </button>
+          </div>
+        )}
+
+        {oos && (
+          <div data-testid="oos-result" className="mt-3 pt-3 border-t border-[#8B5CF6]/20 space-y-2 fade-up">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-head font-bold text-sm">Validazione Walk-Forward</span>
+              <span data-testid="oos-verdict-badge"
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-bold border ${
+                  oos.verdict === "robusta" ? "border-[#10B981]/50 bg-[#10B981]/10 text-[#10B981]"
+                  : oos.verdict === "fragile" ? "border-[#EF4444]/50 bg-[#EF4444]/10 text-[#EF4444]"
+                  : "border-[#F59E0B]/50 bg-[#F59E0B]/10 text-[#F59E0B]"}`}>
+                {oos.verdict === "robusta" ? "ROBUSTA" : oos.verdict === "fragile" ? "FRAGILE (overfitting)" : "INCERTA"}
+              </span>
+              {oos.degradation != null && (
+                <span className="text-[11px] font-mono text-[#94A3B8]">rendita OOS/IS: <b className={oos.degradation >= 0.5 ? "text-up" : "text-down"}>{oos.degradation}×</b></span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {[["In-Sample (studio)", oos.in_sample, "#0EA5E9"], ["Out-of-Sample (mai visto)", oos.out_sample, oos.verdict === "fragile" ? "#EF4444" : "#10B981"]].map(([label, seg, col], k) => (
+                <div key={k} className="rounded-lg border border-[#1E293B] bg-[#0B0E17] p-2.5">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="overline" style={{ color: col }}>{label}</span>
+                    <span className="text-[10px] font-mono text-[#64748B]">{fmtDate(seg.period_start, false)} → {fmtDate(seg.period_end, false)}</span>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1 font-mono text-[11px] mb-1">
+                    <Mini label="WR" value={`${seg.winrate}%`} />
+                    <Mini label="PF" value={seg.profit_factor} color={seg.profit_factor >= 1 ? "#10B981" : "#EF4444"} />
+                    <Mini label="Annua" value={`${seg.annual_return}%`} color={seg.annual_return >= 0 ? "#10B981" : "#EF4444"} />
+                    <Mini label="DD" value={`-${seg.max_drawdown}%`} color="#EF4444" />
+                    <Mini label="Trade" value={seg.trades} />
+                  </div>
+                  <ResponsiveContainer width="100%" height={70}>
+                    <LineChart data={seg.equity_curve.map((e, i) => ({ i, e }))}>
+                      <YAxis domain={["dataMin", "dataMax"]} hide />
+                      <Line type="monotone" dataKey="e" stroke={col} strokeWidth={1.6} dot={false} isAnimationActive={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ))}
+            </div>
+
+            <div className={`flex items-start gap-2 text-[11px] rounded-lg p-2.5 leading-relaxed border ${
+              oos.verdict === "robusta" ? "text-[#10B981] bg-[#10B981]/5 border-[#10B981]/30"
+              : oos.verdict === "fragile" ? "text-[#EF4444] bg-[#EF4444]/8 border-[#EF4444]/40"
+              : "text-[#F59E0B] bg-[#F59E0B]/5 border-[#F59E0B]/30"}`}>
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                {oos.verdict_text} La config è stata scelta SOLO sul periodo di studio ({oos.in_sample.days}g) e poi applicata,
+                <b> senza modifiche</b>, al periodo mai visto ({oos.out_sample.days}g). Se i due risultati divergono molto, è
+                overfitting: bello sul passato, inaffidabile sul futuro. È così che si smaschera il mito del "98% winrate".
+              </span>
+            </div>
           </div>
         )}
       </div>
@@ -405,6 +480,15 @@ export default function ForwardTest({ symbol }) {
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+function Mini({ label, value, color }) {
+  return (
+    <div className="text-center">
+      <div className="overline">{label}</div>
+      <div className="font-bold" style={{ color: color || "#F8FAFC" }}>{value}</div>
     </div>
   );
 }

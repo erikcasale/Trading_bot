@@ -742,6 +742,7 @@ class OptimizeReq(BaseModel):
     bars: int = 500
     target_annual: float = 50.0
     max_dd: float = 40.0
+    split: float = 0.7
 
 
 def _period_days(candles, timeframe):
@@ -829,6 +830,75 @@ def _optimize_compute(candles, cfg, timeframe, target_annual, max_dd):
         "final_equity": final["true_equity"], "realized_net": final["realized_net"],
         "equity_curve": final["equity_curve"],
     }
+
+@api_router.post("/optimize/oos")
+async def optimize_oos(body: OptimizeReq, user: dict = Depends(get_current_user)):
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    cfg = INSTRUMENTS[body.symbol]
+    bars = max(300, min(body.bars, 800))
+    real = await metaapi_service.fetch_candles(body.symbol, body.timeframe, bars)
+    if real and len(real) >= 260:
+        candles, source = real[-bars:], "real"
+    else:
+        candles, _ = generate_candles(body.symbol, body.timeframe, bars)
+        source = "simulated"
+    result = await asyncio.to_thread(_optimize_oos_compute, candles, cfg, body.timeframe,
+                                     body.target_annual, body.max_dd, body.split)
+    if result is None:
+        raise HTTPException(status_code=422, detail="Dati insufficienti per la validazione out-of-sample")
+    result.update({"symbol": body.symbol, "source": source})
+    return result
+
+
+def _optimize_oos_compute(candles, cfg, timeframe, target_annual, max_dd, split):
+    n = len(candles)
+    split = min(0.85, max(0.5, split))
+    cut = int(n * split)
+    is_c, oos_c = candles[:cut], candles[cut:]
+    if len(is_c) < 150 or len(oos_c) < 90:
+        return None
+    # 1) optimize ONLY on the in-sample slice
+    is_res = _optimize_compute(is_c, cfg, timeframe, target_annual, max_dd)
+    if is_res is None:
+        return None
+    params = is_res["best_params"]
+    risk = is_res["recommended_risk_percent"]
+    # 2) apply the SAME config + risk to the unseen out-of-sample slice
+    oos_days = _period_days(oos_c, timeframe)
+    oos = run_forward_test(oos_c, cfg, risk, params=params)
+    oos_ret = oos["realized_net"] / oos["start_equity"] * 100
+    oos_annual = round(oos_ret * (365.0 / oos_days), 1)
+
+    if oos["total_trades"] < 8:
+        verdict, vtext = "incerta", "Pochi trade out-of-sample: campione troppo piccolo per concludere."
+    elif oos["profit_factor"] >= 1.0 and oos_annual > 0:
+        verdict, vtext = "robusta", "La strategia resta profittevole su dati MAI visti: segnale di robustezza."
+    else:
+        verdict, vtext = "fragile", "Crolla sui dati mai visti: classico overfitting, non affidabile dal vivo."
+    is_annual = is_res["projected_annual_return"]
+    degradation = round(oos_annual / is_annual, 2) if is_annual > 0 else None
+
+    return {
+        "timeframe": timeframe, "split": split, "risk_percent": risk,
+        "best_params": params, "combos_tested": is_res["combos_tested"],
+        "verdict": verdict, "verdict_text": vtext, "degradation": degradation,
+        "in_sample": {
+            "days": is_res["days"], "winrate": is_res["winrate"], "profit_factor": is_res["profit_factor"],
+            "trades": is_res["trades"], "annual_return": is_annual,
+            "max_drawdown": is_res["projected_max_drawdown"], "equity_curve": is_res["equity_curve"],
+            "period_start": is_c[0]["time"], "period_end": is_c[-1]["time"],
+        },
+        "out_sample": {
+            "days": round(oos_days, 1), "winrate": oos["winrate"], "profit_factor": oos["profit_factor"],
+            "trades": oos["total_trades"], "annual_return": oos_annual,
+            "max_drawdown": oos["max_drawdown"], "net": oos["realized_net"],
+            "equity_curve": oos["equity_curve"],
+            "period_start": oos_c[0]["time"], "period_end": oos_c[-1]["time"],
+        },
+    }
+
+
 
 
 class LiveOrderReq(BaseModel):
