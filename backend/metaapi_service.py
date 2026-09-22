@@ -194,8 +194,39 @@ async def fetch_candles(symbol: str, timeframe: str, n: int):
 
 _price_cache = {"ts": 0.0, "data": {}}
 _dref_cache = {"ts": 0.0, "data": {}}
+_acct_cache = {"ts": 0.0, "data": None}
 _refs_lock = asyncio.Lock()
 _real_symbols = set()  # symbols that have ever returned a real broker price
+
+
+async def get_account_info():
+    """Real MT5 account {balance, equity, currency, margin, free_margin,
+    leverage, profit} from the broker, or None if unavailable. Cached 8s."""
+    now = time.time()
+    if (now - _acct_cache["ts"]) < 8 and _acct_cache["data"]:
+        return _acct_cache["data"]
+    if not await check_connected():
+        return None
+    try:
+        conn = await _ensure_rpc()
+        info = await asyncio.wait_for(conn.get_account_information(), timeout=8)
+        if not info or info.get("equity") is None:
+            return None
+        data = {
+            "balance": round(info.get("balance", 0), 2),
+            "equity": round(info.get("equity", 0), 2),
+            "currency": info.get("currency", "USD"),
+            "margin": round(info.get("margin", 0), 2),
+            "free_margin": round(info.get("freeMargin", 0), 2),
+            "leverage": info.get("leverage"),
+            "profit": round(info.get("profit", 0), 2),
+        }
+        _acct_cache.update({"ts": now, "data": data})
+        return data
+    except Exception as e:
+        _state["last_error"] = str(e)[:200]
+        _state["connection"] = None
+        return None
 
 
 def is_configured():

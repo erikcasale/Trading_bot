@@ -456,6 +456,14 @@ def _clean(doc):
 async def get_bot(user: dict = Depends(get_current_user)):
     bot = await db.bots.find_one({"user_id": user["id"]}, {"_id": 0})
     acc = await db.accounts.find_one({"user_id": user["id"]}, {"_id": 0})
+    real = await metaapi_service.get_account_info()
+    if real:
+        acc = {**(acc or {}), "balance": real["balance"], "equity": real["equity"],
+               "currency": real["currency"], "profit": real["profit"],
+               "leverage": real.get("leverage"), "free_margin": real["free_margin"],
+               "real": True}
+    else:
+        acc = {**(acc or {}), "real": False}
     return {"bot": bot, "account": acc}
 
 @api_router.put("/bot")

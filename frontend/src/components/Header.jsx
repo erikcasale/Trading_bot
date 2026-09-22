@@ -15,7 +15,10 @@ export default function Header({ botStatus, account, onKill }) {
     return () => { alive = false; clearInterval(t); };
   }, []);
 
-  const balance = account?.balance ?? 100000;
+  const isReal = account?.real === true;
+  const equity = account?.equity ?? account?.balance ?? 100000;
+  const currency = account?.currency || "USD";
+  const curSym = { USD: "$", EUR: "€", GBP: "£" }[currency] || "";
   const marquee = [...ticks, ...ticks];
 
   return (
@@ -58,12 +61,15 @@ export default function Header({ botStatus, account, onKill }) {
 
         <div className="flex items-center gap-2 shrink-0">
           <div data-testid="account-balance-badge"
-               className="hidden sm:flex items-center gap-1.5 bg-[#0B0E17] border border-[#1E293B] rounded-lg px-3 py-1.5">
-            <Wallet className="w-3.5 h-3.5 text-[#F59E0B]" />
-            <span className="font-mono text-sm font-semibold">
-              ${balance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+               className="hidden sm:flex items-center gap-1.5 bg-[#0B0E17] border border-[#1E293B] rounded-lg px-3 py-1.5"
+               title={isReal ? `Equity reale conto MetaApi (${currency})` : "Saldo demo (broker non connesso)"}>
+            <Wallet className={`w-3.5 h-3.5 ${isReal ? "text-[#10B981]" : "text-[#F59E0B]"}`} />
+            <span data-testid="account-equity-value" className="font-mono text-sm font-semibold">
+              {curSym}{equity.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
-            <span className="text-[10px] font-mono text-[#64748B]">DEMO</span>
+            <span className={`text-[10px] font-mono font-bold ${isReal ? "text-[#10B981]" : "text-[#64748B]"}`}>
+              {isReal ? "REALE" : "DEMO"}
+            </span>
           </div>
 
           <button data-testid="header-kill-switch" onClick={onKill}

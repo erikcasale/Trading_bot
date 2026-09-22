@@ -44,6 +44,13 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Equity reale nell'header (2026-09-22)
+Richiesta: sostituire il saldo demo fisso ($175k) con l'equity vera del conto MetaApi.
+- `metaapi_service.get_account_info()`: legge balance/equity/currency/margin/leverage/profit via RPC `get_account_information()` (cache 8s).
+- `/api/bot`: se il broker è connesso, sovrascrive l'account con equity/balance/valuta reali e flag `real:true`.
+- Header: mostra l'equity reale con simbolo valuta (es. €9.999,15) e badge verde **REALE** (icona verde); fallback badge **DEMO** ambra se il broker non è connesso.
+- Verificato: conto demo €10.000, equity €9.999,15 EUR, leva 30.
+
 ## Miglioramenti verifica trade (2026-09-22)
 Quattro migliorie richieste dall'utente, implementate e verificate (curl + screenshot):
 1. **Precisione Intraday**: endpoint `POST /api/forwardtest/intraday` scarica le candele H1 nel/i giorno/i del trade e trova l'ORA ESATTA del primo tocco SL/TP (es. SL toccato alle 15:00 del 16/07). `metaapi_service.fetch_candles_before()` per il fetch su intervallo. Frontend: pulsante orologio "intraday" per riga che mostra "·HH:MM TP/SL" (o "SL/TP?" se ambiguo nella stessa candela).
