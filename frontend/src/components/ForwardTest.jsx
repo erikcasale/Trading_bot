@@ -36,6 +36,8 @@ export default function ForwardTest({ symbol }) {
   const [disc, setDisc] = useState(null);
   const [discLoading, setDiscLoading] = useState(false);
   const [intraday, setIntraday] = useState({});
+  const [intradayAll, setIntradayAll] = useState({ loading: false, done: 0, total: 0 });
+  const intradayPoll = useRef(null);
   const discPoll = useRef(null);
   const timer = useRef(null);
 
@@ -44,8 +46,8 @@ export default function ForwardTest({ symbol }) {
     setRes(null); setPlaying(false); setIdx(0); setOpt(null); setOos(null); setDisc(null);
     if (discPoll.current) clearInterval(discPoll.current);
   }, [symbol]);
-  useEffect(() => { setIntraday({}); }, [res]);
-  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); }, []);
+  useEffect(() => { setIntraday({}); setIntradayAll({ loading: false, done: 0, total: 0 }); }, [res]);
+  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); }, []);
 
   const isDaily = res && (res.timeframe === "D1" || res.timeframe === "D");
 
@@ -65,6 +67,39 @@ export default function ForwardTest({ symbol }) {
     const txt = `${symbol} ${d}`;
     if (navigator.clipboard) navigator.clipboard.writeText(txt);
     toast.success(`Copiato per MT5: ${txt}`);
+  };
+
+  const fetchIntradayAll = async () => {
+    if (!res) return;
+    const items = res.trades
+      .map((t, i) => ({ ...t, i }))
+      .filter((t) => t.intrabar && t.result !== "open")
+      .map((t) => ({ index: t.i, side: t.side, sl: t.sl, tp: t.tp, entry_time: t.entry_time, exit_time: t.exit_time }));
+    if (!items.length) return;
+    if (intradayPoll.current) clearInterval(intradayPoll.current);
+    setIntradayAll({ loading: true, done: 0, total: items.length });
+    try {
+      const { data } = await api.post("/forwardtest/intraday_all", { symbol, trades: items });
+      const jobId = data.job_id;
+      let ticks = 0;
+      intradayPoll.current = setInterval(async () => {
+        ticks += 1;
+        try {
+          const { data: st } = await api.get(`/forwardtest/intraday_all/${jobId}`);
+          setIntradayAll({ loading: st.status === "running", done: st.done, total: st.total });
+          setIntraday((s) => {
+            const n = { ...s };
+            Object.entries(st.results || {}).forEach(([k, v]) => { n[k] = { loading: false, ...v }; });
+            return n;
+          });
+          if (st.status !== "running" || ticks > 40) {
+            clearInterval(intradayPoll.current);
+            setIntradayAll((a) => ({ ...a, loading: false }));
+            if (st.status === "done") toast.success("Orari intraday calcolati per tutti i trade");
+          }
+        } catch { /* keep polling */ }
+      }, 2000);
+    } catch { setIntradayAll({ loading: false, done: 0, total: 0 }); toast.error("Calcolo orari non riuscito"); }
   };
 
   const runDiscover = async () => {
@@ -565,7 +600,17 @@ export default function ForwardTest({ symbol }) {
           <div>
             <div className="flex items-center justify-between mb-1">
               <span className="overline">Registro Operazioni · verifica manuale ({res.trades.length})</span>
-              <span className="text-[10px] font-mono text-[#64748B]">orari = ora server broker (MT5)</span>
+              <div className="flex items-center gap-2">
+                {isDaily && (
+                  <button data-testid="intraday-all-button" onClick={fetchIntradayAll} disabled={intradayAll.loading}
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md border border-[#0EA5E9]/40 text-[#38BDF8] hover:bg-[#0EA5E9]/10 transition-colors disabled:opacity-60">
+                    {intradayAll.loading
+                      ? <><Loader2 className="w-3 h-3 animate-spin" />Calcolo {intradayAll.done}/{intradayAll.total}</>
+                      : <><Clock className="w-3 h-3" />Calcola tutti gli orari</>}
+                  </button>
+                )}
+                <span className="text-[10px] font-mono text-[#64748B]">orari = ora server broker (MT5)</span>
+              </div>
             </div>
             {(res.timeframe === "D1" || res.timeframe === "D") && (
               <div data-testid="forwardtest-d1-note" className="flex items-start gap-1.5 text-[10px] text-[#64748B] mb-1.5 leading-relaxed">

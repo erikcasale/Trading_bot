@@ -44,6 +44,12 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## P&L live, dettaglio conto e orari intraday batch (2026-09-22)
+Tre miglioramenti (verificati curl + screenshot):
+1. **P&L Live Conto**: header mostra il P&L aperto reale accanto all'equity (es. "€9.999,22 -€0,78 REALE"), aggiornato ogni 6s via polling `/api/bot`. Se MetaApi non fornisce `profit`, si calcola come equity−balance.
+2. **Dettaglio Conto**: clic sull'equity apre un pannello (`account-detail-panel`) con Saldo, Equity, P&L aperto, Margine libero, Margine usato, Leva (1:30), Valuta (EUR). `get_account_info()` espone anche `margin`; chiusura al clic esterno.
+3. **Precisione su Tutti**: pulsante "Calcola tutti gli orari" (solo D1) avvia `POST /api/forwardtest/intraday_all` (job asincrono, Semaphore(4), H1 per trade in parallelo) e popola l'ora esatta SL/TP di TUTTI i trade in un colpo (~12s per 18 trade). `_intraday_hit()` helper condiviso col singolo endpoint. Frontend fa polling ogni 2s con progresso "Calcolo X/Y".
+
 ## Equity reale nell'header (2026-09-22)
 Richiesta: sostituire il saldo demo fisso ($175k) con l'equity vera del conto MetaApi.
 - `metaapi_service.get_account_info()`: legge balance/equity/currency/margin/leverage/profit via RPC `get_account_information()` (cache 8s).

@@ -461,7 +461,7 @@ async def get_bot(user: dict = Depends(get_current_user)):
         acc = {**(acc or {}), "balance": real["balance"], "equity": real["equity"],
                "currency": real["currency"], "profit": real["profit"],
                "leverage": real.get("leverage"), "free_margin": real["free_margin"],
-               "real": True}
+               "margin": real["margin"], "real": True}
     else:
         acc = {**(acc or {}), "real": False}
     return {"bot": bot, "account": acc}
@@ -837,24 +837,20 @@ class IntradayReq(BaseModel):
     exit_time: Optional[str] = None
 
 
-@api_router.post("/forwardtest/intraday")
-async def forwardtest_intraday(body: IntradayReq, user: dict = Depends(get_current_user)):
-    """Find the exact hour SL/TP was first touched by scanning H1 candles
-    within the trade's day(s). Used to pin down the intraday moment on D1."""
-    if body.symbol not in INSTRUMENTS:
-        raise HTTPException(status_code=404, detail="Strumento non trovato")
+async def _intraday_hit(symbol, side, sl, tp, entry_time, exit_time):
+    """Scan H1 candles in the trade window to find the exact SL/TP touch."""
     try:
-        start = datetime.fromisoformat(body.entry_time.replace("Z", "+00:00"))
-        end = (datetime.fromisoformat(body.exit_time.replace("Z", "+00:00"))
-               if body.exit_time else start + timedelta(days=3))
+        start = datetime.fromisoformat(str(entry_time).replace("Z", "+00:00"))
+        end = (datetime.fromisoformat(str(exit_time).replace("Z", "+00:00"))
+               if exit_time else start + timedelta(days=3))
     except Exception:
-        raise HTTPException(status_code=400, detail="Date non valide")
+        return {"available": False}
     hours = int((end - start).total_seconds() // 3600) + 60
     rows = await metaapi_service.fetch_candles_before(
-        body.symbol, "H1", end + timedelta(hours=6), max(48, min(hours, 1000)))
+        symbol, "H1", end + timedelta(hours=6), max(48, min(hours, 1000)))
     if not rows:
         return {"available": False}
-    side = body.side.upper()
+    side = str(side).upper()
     for c in rows:
         try:
             t = datetime.fromisoformat(str(c["time"]).replace("Z", "+00:00"))
@@ -863,13 +859,78 @@ async def forwardtest_intraday(body: IntradayReq, user: dict = Depends(get_curre
         if t < start or t > end + timedelta(hours=4):
             continue
         hi, lo = c["h"], c["l"]
-        tp_hit = hi >= body.tp if side == "BUY" else lo <= body.tp
-        sl_hit = lo <= body.sl if side == "BUY" else hi >= body.sl
+        tp_hit = hi >= tp if side == "BUY" else lo <= tp
+        sl_hit = lo <= sl if side == "BUY" else hi >= sl
         if tp_hit or sl_hit:
             level = "AMBIGUO" if (tp_hit and sl_hit) else ("TP" if tp_hit else "SL")
             return {"available": True, "found": True, "time": c["time"],
                     "level": level, "ambiguous": tp_hit and sl_hit}
     return {"available": True, "found": False}
+
+
+@api_router.post("/forwardtest/intraday")
+async def forwardtest_intraday(body: IntradayReq, user: dict = Depends(get_current_user)):
+    """Find the exact hour SL/TP was first touched by scanning H1 candles
+    within the trade's day(s). Used to pin down the intraday moment on D1."""
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    return await _intraday_hit(body.symbol, body.side, body.sl, body.tp,
+                               body.entry_time, body.exit_time)
+
+
+class IntradayAllReq(BaseModel):
+    symbol: str
+    trades: list
+
+
+_intraday_jobs = {}
+
+
+@api_router.post("/forwardtest/intraday_all")
+async def forwardtest_intraday_all(body: IntradayAllReq, user: dict = Depends(get_current_user)):
+    """Compute the exact SL/TP hour for ALL trades in one background job
+    (H1 fetch per trade in parallel), so no per-row clicking is needed."""
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    job_id = str(uuid.uuid4())
+    _intraday_jobs[job_id] = {"status": "running", "results": {},
+                              "total": len(body.trades), "done": 0}
+    asyncio.create_task(_run_intraday_all(job_id, body.symbol, body.trades))
+    if len(_intraday_jobs) > 30:
+        for k in [k for k, v in list(_intraday_jobs.items())[:-15] if v.get("status") != "running"]:
+            _intraday_jobs.pop(k, None)
+    return {"job_id": job_id, "status": "running", "total": len(body.trades)}
+
+
+@api_router.get("/forwardtest/intraday_all/{job_id}")
+async def forwardtest_intraday_all_status(job_id: str, user: dict = Depends(get_current_user)):
+    job = _intraday_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job non trovato")
+    return job
+
+
+async def _run_intraday_all(job_id, symbol, trades):
+    job = _intraday_jobs[job_id]
+    sem = asyncio.Semaphore(4)
+
+    async def one(tr):
+        idx = tr.get("index")
+        try:
+            async with sem:
+                r = await _intraday_hit(symbol, tr.get("side"), tr.get("sl"),
+                                        tr.get("tp"), tr.get("entry_time"), tr.get("exit_time"))
+        except Exception:
+            r = {"available": False}
+        job["results"][str(idx)] = r
+        job["done"] += 1
+
+    try:
+        await asyncio.gather(*[one(t) for t in trades])
+        job["status"] = "done"
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)[:200]
 
 
 class OptimizeReq(BaseModel):

@@ -1,24 +1,40 @@
-import { useEffect, useState } from "react";
-import { Activity, Power, LogOut, Wallet } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import { Activity, Power, LogOut, Wallet, ChevronDown } from "lucide-react";
 import api from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 
 export default function Header({ botStatus, account, onKill }) {
   const { user, logout } = useAuth();
   const [ticks, setTicks] = useState([]);
+  const [acct, setAcct] = useState(account);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const detailRef = useRef(null);
+
+  useEffect(() => { setAcct(account); }, [account]);
 
   useEffect(() => {
     let alive = true;
-    const load = () => api.get("/market/watchlist").then((r) => alive && setTicks(r.data)).catch(() => {});
+    const load = () => {
+      api.get("/market/watchlist").then((r) => alive && setTicks(r.data)).catch(() => {});
+      api.get("/bot").then((r) => alive && r.data?.account && setAcct(r.data.account)).catch(() => {});
+    };
     load();
     const t = setInterval(load, 6000);
     return () => { alive = false; clearInterval(t); };
   }, []);
 
-  const isReal = account?.real === true;
-  const equity = account?.equity ?? account?.balance ?? 100000;
-  const currency = account?.currency || "USD";
+  useEffect(() => {
+    const onClick = (e) => { if (detailRef.current && !detailRef.current.contains(e.target)) setDetailOpen(false); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+
+  const isReal = acct?.real === true;
+  const equity = acct?.equity ?? acct?.balance ?? 100000;
+  const currency = acct?.currency || "USD";
   const curSym = { USD: "$", EUR: "€", GBP: "£" }[currency] || "";
+  const profit = acct?.profit ?? 0;
+  const fmtMoney = (v) => `${curSym}${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const marquee = [...ticks, ...ticks];
 
   return (
@@ -60,16 +76,45 @@ export default function Header({ botStatus, account, onKill }) {
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          <div data-testid="account-balance-badge"
-               className="hidden sm:flex items-center gap-1.5 bg-[#0B0E17] border border-[#1E293B] rounded-lg px-3 py-1.5"
-               title={isReal ? `Equity reale conto MetaApi (${currency})` : "Saldo demo (broker non connesso)"}>
-            <Wallet className={`w-3.5 h-3.5 ${isReal ? "text-[#10B981]" : "text-[#F59E0B]"}`} />
-            <span data-testid="account-equity-value" className="font-mono text-sm font-semibold">
-              {curSym}{equity.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
-            <span className={`text-[10px] font-mono font-bold ${isReal ? "text-[#10B981]" : "text-[#64748B]"}`}>
-              {isReal ? "REALE" : "DEMO"}
-            </span>
+          <div ref={detailRef} className="relative hidden sm:block">
+            <button data-testid="account-balance-badge" onClick={() => isReal && setDetailOpen((o) => !o)}
+               className={`flex items-center gap-1.5 bg-[#0B0E17] border border-[#1E293B] rounded-lg px-3 py-1.5 transition-colors ${isReal ? "hover:border-[#10B981]/50 cursor-pointer" : "cursor-default"}`}
+               title={isReal ? `Equity reale conto MetaApi (${currency}) — clic per dettagli` : "Saldo demo (broker non connesso)"}>
+              <Wallet className={`w-3.5 h-3.5 ${isReal ? "text-[#10B981]" : "text-[#F59E0B]"}`} />
+              <span data-testid="account-equity-value" className="font-mono text-sm font-semibold">
+                {fmtMoney(equity)}
+              </span>
+              {isReal && (
+                <span data-testid="account-pnl-value" className={`font-mono text-[11px] font-semibold ${profit >= 0 ? "text-up" : "text-down"}`}>
+                  {profit >= 0 ? "+" : "-"}{fmtMoney(Math.abs(profit))}
+                </span>
+              )}
+              <span className={`text-[10px] font-mono font-bold ${isReal ? "text-[#10B981]" : "text-[#64748B]"}`}>
+                {isReal ? "REALE" : "DEMO"}
+              </span>
+              {isReal && <ChevronDown className={`w-3 h-3 text-[#64748B] transition-transform ${detailOpen ? "rotate-180" : ""}`} />}
+            </button>
+
+            {detailOpen && isReal && (
+              <div data-testid="account-detail-panel"
+                   className="absolute right-0 mt-2 w-60 bg-[#0B0E17] border border-[#1E293B] rounded-xl p-3 shadow-xl z-50 fade-up">
+                <div className="overline mb-2 text-[#10B981]">Conto reale · MetaApi</div>
+                <div className="space-y-1.5 font-mono text-[11px]">
+                  {[["Saldo", fmtMoney(acct?.balance)],
+                    ["Equity", fmtMoney(equity)],
+                    ["P&L aperto", `${profit >= 0 ? "+" : "-"}${fmtMoney(Math.abs(profit))}`, profit >= 0 ? "text-up" : "text-down"],
+                    ["Margine libero", fmtMoney(acct?.free_margin)],
+                    ["Margine usato", fmtMoney(acct?.margin)],
+                    ["Leva", acct?.leverage ? `1:${acct.leverage}` : "—"],
+                    ["Valuta", currency]].map(([k, v, cls]) => (
+                    <div key={k} className="flex items-center justify-between">
+                      <span className="text-[#64748B]">{k}</span>
+                      <span className={cls || "text-[#E2E8F0]"}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <button data-testid="header-kill-switch" onClick={onKill}

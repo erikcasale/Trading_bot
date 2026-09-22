@@ -212,14 +212,18 @@ async def get_account_info():
         info = await asyncio.wait_for(conn.get_account_information(), timeout=8)
         if not info or info.get("equity") is None:
             return None
+        bal = round(info.get("balance", 0), 2)
+        eq = round(info.get("equity", 0), 2)
+        prof = info.get("profit")
+        prof = round(prof if prof is not None else (eq - bal), 2)
         data = {
-            "balance": round(info.get("balance", 0), 2),
-            "equity": round(info.get("equity", 0), 2),
+            "balance": bal,
+            "equity": eq,
             "currency": info.get("currency", "USD"),
             "margin": round(info.get("margin", 0), 2),
             "free_margin": round(info.get("freeMargin", 0), 2),
             "leverage": info.get("leverage"),
-            "profit": round(info.get("profit", 0), 2),
+            "profit": prof,
         }
         _acct_cache.update({"ts": now, "data": data})
         return data
