@@ -989,6 +989,51 @@ async def _run_nosl(job_id, body):
         _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
 
 
+class MlWalkForwardReq(BaseModel):
+    years: List[int] = [2023, 2024, 2025, 2026]
+    start_balance: float = 10000.0
+    lot_per_10k: float = 0.1
+    max_concurrent: int = 10
+
+
+@api_router.post("/portfolio/ml_walkforward")
+async def portfolio_ml_walkforward(body: MlWalkForwardReq, user: dict = Depends(get_current_user)):
+    """Multi-year walk-forward robustness test of the ML gate: retrain each year on
+    prior data only, test that year out-of-sample. NO stop loss; compounding size."""
+    job_id = str(uuid.uuid4())
+    _portfolio_jobs[job_id] = {"status": "running", "result": None, "error": None,
+                               "done": 0, "total": len(FOREX_SYMBOLS)}
+    _portfolio_jobs[job_id]["task"] = asyncio.create_task(_run_ml_wf(job_id, body))
+    return {"job_id": job_id, "status": "running", "total": len(FOREX_SYMBOLS)}
+
+
+async def _run_ml_wf(job_id, body):
+    try:
+        want = int(6 * 260) + 60  # ~6 years so 2023 still has training history
+        data = {}
+        for sym in FOREX_SYMBOLS:
+            candles, source = await _get_d1_history(sym, want)
+            data[sym] = (candles, source)
+            _portfolio_jobs[job_id]["done"] += 1
+        for sym in [s for s, (_, src) in data.items() if src != "real"]:
+            candles, source = await _get_d1_history(sym, want)
+            if source == "real":
+                data[sym] = (candles, source)
+        years = sorted({int(y) for y in body.years})
+        result = await asyncio.to_thread(_ml_walkforward_compute, data, years,
+                                         body.start_balance, body.lot_per_10k, body.max_concurrent)
+        if result is None:
+            _portfolio_jobs[job_id] = {"status": "error", "result": None,
+                                       "error": "Nessun edge appreso / storico insufficiente"}
+            return
+        _portfolio_jobs[job_id] = {"status": "done", "result": result, "error": None}
+    except Exception as e:
+        logger.exception("ml walkforward job failed")
+        _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
+
+
+
+
 def _pt(iso):
     return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
 
@@ -1384,83 +1429,107 @@ def _ml_dataset(candles, closes, cfg, tp_mult, tstop):
     return X, y, pnl, times
 
 
-def _ml_symbol(candles, cfg, start):
-    """Train a gradient-boosting gate on pre-start candidates (validate on the last
-    training year to pick tp_mult + probability threshold), then trade the unseen
-    period taking ONLY high-probability candidates. NO stop loss; time-stop exit."""
+def _ml_fit(candles, closes, cfg, train_end):
+    """Fit the gradient-boosting gate on candidates BEFORE train_end. Pick tp_mult
+    and probability threshold on the last training year (validation), then refit on
+    all pre-train_end data. Returns (model, tp_mult, thr, n_train, val_net) or None."""
     from sklearn.ensemble import GradientBoostingClassifier
-    d = cfg["digits"]
-    closes = [c["c"] for c in candles]
     tstop = 20
-    val_start = start - timedelta(days=365)
-    best = None  # (val_net, tp_mult, thr, model_refit_on_all_pre_start)
+    val_start = train_end - timedelta(days=365)
+    best = None
     for tp_mult in (1.0, 1.5, 2.0):
         X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop)
         idx_core = [k for k, t in enumerate(times) if t < val_start]
-        idx_val = [k for k, t in enumerate(times) if val_start <= t < start]
+        idx_val = [k for k, t in enumerate(times) if val_start <= t < train_end]
         if len(idx_core) < 60 or len(idx_val) < 15:
             continue
         yc = [y[k] for k in idx_core]
         if len(set(yc)) < 2:
             continue
-        Xc = [X[k] for k in idx_core]
         model = GradientBoostingClassifier(n_estimators=150, max_depth=3,
                                            learning_rate=0.05, subsample=0.8, random_state=42)
-        model.fit(Xc, yc)
+        model.fit([X[k] for k in idx_core], yc)
         proba_val = model.predict_proba([X[k] for k in idx_val])[:, 1]
         for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
             net = sum(pnl[idx_val[m]] for m in range(len(idx_val)) if proba_val[m] >= thr)
-            taken = sum(1 for pv in proba_val if pv >= thr)
-            if taken < 5:
+            if sum(1 for pv in proba_val if pv >= thr) < 5:
                 continue
             if best is None or net > best[0]:
                 best = (net, tp_mult, thr)
     if best is None or best[0] <= 0:
-        return None  # no learned edge → don't trade this symbol
+        return None
     _, tp_mult, thr = best
-    # refit on ALL pre-start candidates (still no look-ahead into the test period)
     X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop)
-    idx_tr = [k for k, t in enumerate(times) if t < start]
+    idx_tr = [k for k, t in enumerate(times) if t < train_end]
     ytr = [y[k] for k in idx_tr]
     if len(set(ytr)) < 2:
         return None
     model = GradientBoostingClassifier(n_estimators=150, max_depth=3,
                                        learning_rate=0.05, subsample=0.8, random_state=42)
     model.fit([X[k] for k in idx_tr], ytr)
+    return model, tp_mult, thr, len(idx_tr), round(best[0], 5)
 
-    trades, open_t, n = [], None, len(candles)
+
+def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, test_end=None):
+    """Trade the model on [test_start, test_end): open only high-proba candidates.
+    NO price stop; exit at TP or time-stop. Positions still open at test_end are
+    left floating (open=True) valued at the last in-window candle."""
+    d = cfg["digits"]
+    n = len(candles)
+    if test_end is not None:
+        in_win = [i for i in range(n) if _pt(_bar_close(candles, i)) < test_end]
+        last_idx = in_win[-1] if in_win else n - 1
+    else:
+        last_idx = n - 1
+    trades, open_t = [], None
     for i in range(200, n):
         c = candles[i]
         if open_t is not None:
             side, tp = open_t["side"], open_t["tp"]
             hit = (side == "BUY" and c["h"] >= tp) or (side == "SELL" and c["l"] <= tp)
             timed = (i - open_t["entry_index"]) >= tstop
-            if hit or timed:
+            if i > last_idx and not (hit or timed):
+                open_t.update(exit_index=last_idx, exit=round(candles[last_idx]["c"], d),
+                              exit_time=_bar_close(candles, last_idx), open=True, timed=False)
+                trades.append(open_t)
+                open_t = None
+            elif hit or timed:
                 open_t.update(exit_index=i, exit=round(tp if hit else c["c"], d),
                               exit_time=_bar_close(candles, i), open=False,
                               timed=bool(timed and not hit))
                 trades.append(open_t)
                 open_t = None
-        if open_t is None and i < n - 1:
-            if _pt(_bar_close(candles, i)) < start:
+        if open_t is None and 200 <= i <= last_idx and i < n - 1:
+            bt = _pt(_bar_close(candles, i))
+            if bt < test_start or (test_end is not None and bt >= test_end):
                 continue
             side = _candidate_side(closes, i)
             if not side:
                 continue
-            proba = model.predict_proba([_ml_features(candles, closes, i, side)])[0][1]
-            if proba < thr:
+            if model.predict_proba([_ml_features(candles, closes, i, side)])[0][1] < thr:
                 continue
             entry = closes[i]
             atr = _atr_at(candles, i, 14) or cfg["vol"]
             tp = entry + (1 if side == "BUY" else -1) * atr * tp_mult
             open_t = {"entry_index": i, "entry_time": _bar_close(candles, i), "side": side,
-                      "entry": round(entry, d), "tp": round(tp, d), "open": True, "proba": round(float(proba), 3)}
+                      "entry": round(entry, d), "tp": round(tp, d), "open": True}
+        if i > last_idx and open_t is None:
+            break
     if open_t is not None:
-        open_t.update(exit_index=n - 1, exit=round(candles[-1]["c"], d),
-                      exit_time=_bar_close(candles, n - 1), open=True, timed=False)
+        open_t.update(exit_index=last_idx, exit=round(candles[last_idx]["c"], d),
+                      exit_time=_bar_close(candles, last_idx), open=True, timed=False)
         trades.append(open_t)
-    info = {"tp_atr": tp_mult, "time_stop": tstop, "threshold": round(thr, 2),
-            "train_candidates": len(idx_tr), "val_net": round(best[0], 5)}
+    return trades
+
+
+def _ml_symbol(candles, cfg, start):
+    fit = _ml_fit(candles, [c["c"] for c in candles], cfg, start)
+    if fit is None:
+        return None
+    model, tp_mult, thr, n_train, val_net = fit
+    trades = _ml_generate(candles, [c["c"] for c in candles], cfg, model, tp_mult, thr, 20, start, None)
+    info = {"tp_atr": tp_mult, "time_stop": 20, "threshold": round(thr, 2),
+            "train_candidates": n_train, "val_net": val_net}
     return trades, info
 
 
@@ -1503,6 +1572,102 @@ def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurren
                               "last_price": candles[-1]["c"], "digits": cfg["digits"]})
     return _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_balance,
                         lot_per_10k, max_concurrent, real_syms, sim_syms, "nosl_ml")
+
+
+def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurrent):
+    """Multi-year walk-forward: for each test year Y, retrain the ML gate ONLY on
+    data before Jan 1 of Y (validation on Y-1), then trade Y out-of-sample. Balance
+    resets to start_balance each year so per-year results are directly comparable."""
+    per_year, real_syms_all, sim_syms_all = [], set(), set()
+    # precompute fits/trades per (symbol, year)
+    for Y in years:
+        test_start = datetime(Y, 1, 1, tzinfo=timezone.utc)
+        test_end = datetime(Y + 1, 1, 1, tzinfo=timezone.utc)
+        positions = []
+        price_on, all_dates, sym_strategy = {}, set(), {}
+        year_real, year_sim = [], []
+        for sym, (candles, source) in data.items():
+            if not candles or len(candles) < 300:
+                continue
+            cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
+            closes = [c["c"] for c in candles]
+            # need training history before the test year
+            if _pt(candles[0]["time"]) >= test_start - timedelta(days=400):
+                continue
+            (year_real if source == "real" else year_sim).append(sym)
+            try:
+                fit = _ml_fit(candles, closes, cfg, test_start)
+            except Exception:
+                logger.exception("wf fit %s %s failed", sym, Y)
+                fit = None
+            if fit is None:
+                continue
+            model, tp_mult, thr, n_train, val_net = fit
+            trades = _ml_generate(candles, closes, cfg, model, tp_mult, thr, 20, test_start, test_end)
+            contract = CONTRACT_SIZE.get(sym, 100000)
+            price_on[sym] = {}
+            for c in candles:
+                dd = _pt(c["time"]).date()
+                if test_start <= _pt(c["time"]) < test_end:
+                    price_on[sym][dd] = c["c"]
+                    all_dates.add(dd)
+            if not price_on[sym]:
+                continue
+            year_end_px = max(price_on[sym])
+            sym_strategy[sym] = {"label": "ML gate (gradient boosting)", "entry": "ml_meanrev",
+                                 "tp_atr": tp_mult, "time_stop": 20, "threshold": round(thr, 2),
+                                 "train_candidates": n_train}
+            for t in trades:
+                et = _pt(t["entry_time"])
+                if not (test_start <= et < test_end):
+                    continue
+                xt = _pt(t["exit_time"])
+                positions.append({"sym": sym, "side": t["side"], "dir": 1 if t["side"] == "BUY" else -1,
+                                  "entry": t["entry"], "tp": t["tp"], "entry_t": et,
+                                  "exit_t": xt, "exit": t["exit"], "contract": contract,
+                                  "open": t["open"], "timed": t.get("timed", False),
+                                  "last_price": price_on[sym][year_end_px], "digits": cfg["digits"]})
+        res = _nosl_settle(positions, price_on, all_dates, sym_strategy, test_start, start_balance,
+                           lot_per_10k, max_concurrent, year_real, year_sim, f"nosl_ml_wf_{Y}")
+        year_real and real_syms_all.update(year_real)
+        year_sim and sim_syms_all.update(year_sim)
+        if res is None:
+            per_year.append({"year": Y, "traded": False, "real_symbols": year_real,
+                             "simulated_symbols": year_sim})
+            continue
+        per_year.append({
+            "year": Y, "traded": True,
+            "true_equity": res["true_equity"], "return_percent": res["return_true_percent"],
+            "realized_balance": res["realized_balance"], "max_drawdown": res["max_drawdown"],
+            "min_equity": res["min_equity"], "closed_trades": res["closed_trades"],
+            "tp_wins": res["tp_wins"], "timed_exits": res["timed_exits"],
+            "open_trades": res["open_trades"], "open_floating": res["open_floating"],
+            "wiped": res["wiped"], "per_symbol": res["per_symbol"],
+            "equity_curve": res["equity_curve"], "real_symbols": year_real,
+            "simulated_symbols": year_sim,
+        })
+    traded = [y for y in per_year if y.get("traded")]
+    if not traded:
+        return None
+    rets = [y["return_percent"] for y in traded]
+    # equity compounded across the tested years (sequential)
+    comp = start_balance
+    for r in rets:
+        comp *= (1 + r / 100.0)
+    positive = sum(1 for r in rets if r > 0)
+    summary = {
+        "years_tested": len(traded), "positive_years": positive,
+        "avg_return": round(sum(rets) / len(rets), 2),
+        "best_year": round(max(rets), 2), "worst_year": round(min(rets), 2),
+        "compounded_equity": round(comp, 2),
+        "compounded_return": round((comp - start_balance) / start_balance * 100, 1),
+        "worst_drawdown": round(max(y["max_drawdown"] for y in traded), 2),
+        "any_wiped": any(y["wiped"] for y in traded),
+    }
+    return {"mode": "ml_walkforward", "start_balance": start_balance,
+            "lot_per_10k": lot_per_10k, "years": per_year, "summary": summary,
+            "real_symbols": sorted(real_syms_all), "simulated_symbols": sorted(sim_syms_all)}
+
 
 
 

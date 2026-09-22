@@ -85,6 +85,18 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - CONFRONTO 3 MOTORI (2026 reale, no-SL, 0,1/10k): classico €8.545 (-14,5%) | mean-reversion €10.461 (+4,6%) | ML €10.723 (+7,2%). Il TP-hit rate sale a 70% (vs 51%).
 - ONESTÀ: resta un backtest storico; ~730 candidati/simbolo su 4 anni sono limitati → rischio overfitting anche con validazione walk-forward. Nessuna garanzia futura; no-SL sempre senza protezione di prezzo. Frontend usa engine "ml" di default.
 
+## Walk-Forward PLURIENNALE del modello ML (2026-06) — DATI REALI 5/5
+- Richiesta utente: "riaddestrare il modello annualmente su periodi 2023-2025 e testarlo anno per anno per verificare la robustezza nel tempo."
+- Backend: `POST /api/portfolio/ml_walkforward` (job async, body {years,start_balance,lot_per_10k,max_concurrent}) → `_run_ml_wf` (fetch 6 anni D1) → `_ml_walkforward_compute`. Rifattorizzato `_ml_symbol` in `_ml_fit(candles,closes,cfg,train_end)` (selezione tp_mult+soglia su validazione = anno prima di train_end, refit su tutto il pre-train_end) e `_ml_generate(...,test_start,test_end)` (trada solo nella finestra, posizioni ancora aperte a fine anno lasciate flottanti valutate all'ultima candela dell'anno). Per ogni anno Y: train su <1 gen Y, test su [1 gen Y, 1 gen Y+1), reset €10k. NO price SL, size composta 0,1/€10k.
+- RISULTATO REALE 5/5 (retrain annuale, out-of-sample):
+  - 2023: €11.114 (+11,1%), maxDD 16,4%, 118 chiusi (81 TP/37 TS)
+  - 2024: €8.457 (**-15,4%**), maxDD 16,0%, 99 chiusi (59/40) — ANNO PERDENTE
+  - 2025: €11.058 (+10,6%), maxDD 17,9%, 91 chiusi (65/26)
+  - 2026: €11.625 (+16,2%), maxDD 9,7%, 87 chiusi (64/23)
+  - SOMMARIO: 3/4 anni positivi, media +5,62%/anno, migliore +16,2% / peggiore -15,4%, equity composta €12.079 (+20,8% su 4 anni), peggior DD 17,9%, mai azzerato.
+- ONESTÀ (fondamentale): il modello NON è sempre profittevole — il 2024 perde -15,4% su dati mai visti. L'edge è reale ma FRAGILE (regge 3 anni su 4, con un anno a doppia cifra negativa). Questo è il valore del walk-forward: smaschera la robustezza reale. Backtest storico, nessuna garanzia futura.
+- Frontend: pannello `wf-panel` (bottone `wf-run-button`, tabella `wf-years-table`, stat anni positivi/miglior-peggior/equity composta/peggior DD). NOTA: verifica UI limitata a compile + coerenza dati (screenshot-tool non mantiene il login demo — flakiness del tool, /auth/me OK via API).
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.

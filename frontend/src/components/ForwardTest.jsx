@@ -43,6 +43,9 @@ export default function ForwardTest({ symbol }) {
   const [nosl, setNosl] = useState(null);
   const [noslState, setNoslState] = useState({ loading: false, done: 0, total: 5 });
   const noslPoll = useRef(null);
+  const [wf, setWf] = useState(null);
+  const [wfState, setWfState] = useState({ loading: false, done: 0, total: 5 });
+  const wfPoll = useRef(null);
   const pfPoll = useRef(null);
   const intradayPoll = useRef(null);
   const discPoll = useRef(null);
@@ -54,7 +57,7 @@ export default function ForwardTest({ symbol }) {
     if (discPoll.current) clearInterval(discPoll.current);
   }, [symbol]);
   useEffect(() => { setIntraday({}); setIntradayAll({ loading: false, done: 0, total: 0 }); }, [res]);
-  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); if (pfPoll.current) clearInterval(pfPoll.current); if (noslPoll.current) clearInterval(noslPoll.current); }, []);
+  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); if (pfPoll.current) clearInterval(pfPoll.current); if (noslPoll.current) clearInterval(noslPoll.current); if (wfPoll.current) clearInterval(wfPoll.current); }, []);
 
   const runPortfolio = async () => {
     if (pfPoll.current) clearInterval(pfPoll.current);
@@ -105,6 +108,32 @@ export default function ForwardTest({ symbol }) {
       }, 4000);
     } catch { setNoslState({ loading: false, done: 0, total: 7 }); toast.error("Impossibile avviare il test"); }
   };
+
+  const runWf = async () => {
+    if (wfPoll.current) clearInterval(wfPoll.current);
+    setWf(null); setWfState({ loading: true, done: 0, total: 5 });
+    try {
+      const { data } = await api.post("/portfolio/ml_walkforward", { years: [2023, 2024, 2025, 2026], start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10 });
+      const jobId = data.job_id;
+      let ticks = 0;
+      wfPoll.current = setInterval(async () => {
+        ticks += 1;
+        try {
+          const { data: st } = await api.get(`/portfolio/backtest/${jobId}`);
+          setWfState({ loading: st.status === "running", done: st.done || 0, total: st.total || 5 });
+          if (st.status === "done") {
+            clearInterval(wfPoll.current); setWf(st.result); setWfState({ loading: false, done: 5, total: 5 });
+            const s = st.result.summary;
+            toast.message(`Walk-forward: ${s.positive_years}/${s.years_tested} anni positivi · media ${s.avg_return}%/anno`);
+          } else if (st.status === "error" || ticks > 120) {
+            clearInterval(wfPoll.current); setWfState({ loading: false, done: 0, total: 5 });
+            toast.error(st.error || "Walk-forward non riuscito");
+          }
+        } catch { /* keep polling */ }
+      }, 4000);
+    } catch { setWfState({ loading: false, done: 0, total: 5 }); toast.error("Impossibile avviare il walk-forward"); }
+  };
+
 
   const exportPortfolioCsv = () => {
     if (!pf) return;
@@ -474,6 +503,82 @@ export default function ForwardTest({ symbol }) {
           </div>
         )}
       </div>
+
+      {/* Multi-year walk-forward robustness of the ML gate */}
+      <div data-testid="wf-panel" className="mb-3 rounded-lg border border-[#0EA5E9]/40 bg-[#0EA5E9]/5 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-[#0EA5E9]" />
+            <span className="font-head font-bold text-sm">Walk-Forward pluriennale (robustezza ML)</span>
+            <span className="overline">riaddestra ogni anno · testa 2023 → 2026 · reset €10k/anno</span>
+          </div>
+          <button data-testid="wf-run-button" onClick={runWf} disabled={wfState.loading}
+            className="inline-flex items-center gap-1.5 bg-[#0EA5E9] hover:bg-[#0284C7] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+            {wfState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FastForward className="w-3.5 h-3.5" />}
+            {wfState.loading ? `Addestro & testo ${wfState.done}/${wfState.total}…` : "Avvia walk-forward"}
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
+          Per ogni anno il modello è <b className="text-white">riaddestrato solo sui dati precedenti</b> (validazione sull'anno prima) e testato su quell'anno mai visto. Serve a capire se l'edge <b className="text-white">regge nel tempo</b> o era fortuna di un singolo periodo. Nessuno stop loss, size composta 0,1/€10k.
+        </p>
+
+        {wf && (
+          <div data-testid="wf-result" className="mt-3 space-y-2 fade-up">
+            {wf.simulated_symbols?.length > 0 && (
+              <div className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/10 border border-[#F59E0B]/40 rounded-lg p-2">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{wf.simulated_symbols.join(", ")}: dati simulati. Riprova per averli reali.</span>
+              </div>
+            )}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <BigStat testid="wf-positive-years" label="Anni positivi" value={`${wf.summary.positive_years}/${wf.summary.years_tested}`} sub={`media ${wf.summary.avg_return >= 0 ? "+" : ""}${wf.summary.avg_return}%/anno`} color={wf.summary.positive_years > wf.summary.years_tested / 2 ? "#10B981" : "#EF4444"} />
+              <BigStat label="Miglior / Peggior anno" value={`+${wf.summary.best_year}%`} sub={`peggiore ${wf.summary.worst_year}%`} color="#0EA5E9" />
+              <BigStat label="Equity composta" value={`€${wf.summary.compounded_equity.toLocaleString("it-IT")}`} sub={`${wf.summary.compounded_return >= 0 ? "+" : ""}${wf.summary.compounded_return}% su ${wf.summary.years_tested} anni`} color={wf.summary.compounded_return >= 0 ? "#10B981" : "#EF4444"} />
+              <BigStat label="Peggior drawdown" value={`-${wf.summary.worst_drawdown}%`} sub={wf.summary.any_wiped ? "conto azzerato in un anno" : "mai azzerato"} color={wf.summary.any_wiped ? "#EF4444" : "#F59E0B"} />
+            </div>
+            <div className="rounded-lg border border-white/10 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px]" data-testid="wf-years-table">
+                  <thead>
+                    <tr className="text-[#64748B] text-left">
+                      <th className="px-2 py-1 font-medium">Anno</th>
+                      <th className="px-2 py-1 font-medium text-right">Equity fine anno</th>
+                      <th className="px-2 py-1 font-medium text-right">Rendimento</th>
+                      <th className="px-2 py-1 font-medium text-right">Max DD</th>
+                      <th className="px-2 py-1 font-medium text-right">Chiusi</th>
+                      <th className="px-2 py-1 font-medium text-right">TP / time-stop</th>
+                      <th className="px-2 py-1 font-medium text-right">Aperte</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {wf.years.map((y) => (
+                      <tr key={y.year} className="border-t border-white/5">
+                        <td className="px-2 py-1 font-semibold text-white">{y.year}</td>
+                        {y.traded ? (
+                          <>
+                            <td className="px-2 py-1 text-right text-[#CBD5E1]">€{y.true_equity.toLocaleString("it-IT")}</td>
+                            <td className={`px-2 py-1 text-right font-bold ${y.return_percent >= 0 ? "text-[#10B981]" : "text-[#EF4444]"}`}>{y.return_percent >= 0 ? "+" : ""}{y.return_percent}%</td>
+                            <td className="px-2 py-1 text-right text-[#F59E0B]">-{y.max_drawdown}%</td>
+                            <td className="px-2 py-1 text-right text-[#94A3B8]">{y.closed_trades}</td>
+                            <td className="px-2 py-1 text-right text-[#94A3B8]">{y.tp_wins} / {y.timed_exits}</td>
+                            <td className="px-2 py-1 text-right text-[#94A3B8]">{y.open_trades}</td>
+                          </>
+                        ) : (
+                          <td className="px-2 py-1 text-[#64748B]" colSpan={6}>non tradato — storico insufficiente per l'addestramento</td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <p className="text-[10px] text-[#94A3B8] leading-relaxed">
+              Ogni anno riparte da €10.000 (risultati confrontabili). Un edge robusto è positivo nella maggior parte degli anni con drawdown gestibili; un anno negativo è normale e onesto — se il modello perde in un anno mai visto, lo vedi qui. Resta un backtest storico: non garantisce risultati futuri.
+            </p>
+          </div>
+        )}
+      </div>
+
 
       {/* Portfolio backtest — shared 10k account, multiple instruments, from 2025 */}
       <div data-testid="portfolio-panel" className="mb-3 rounded-lg border border-[#8B5CF6]/40 bg-[#8B5CF6]/5 p-3">
