@@ -44,6 +44,14 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Test SENZA Stop Loss a interesse composto (2026) — iterazione 12 (8/8 backend, frontend 100%)
+Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse composto, test sul 2026".
+- `POST /api/portfolio/nosl` (job asincrono, status via GET /api/portfolio/backtest/{job_id}). `_nosl_compute`: addestra su dati pre-2026 (_pick_params), genera le entry con run_forward_test, poi ricalcola l'uscita SENZA SL (chiude solo al TP, altrimenti resta aperta fino a fine periodo). Size compounding: lot = lot_per_10k * equity/10000 (min 0.01). CONTRACT_SIZE per il calcolo in denaro (forex 100k, XAU 100, US30 1).
+- Doppia metrica onesta: `realized_balance` (SOLO trade chiusi al TP → sembra altissimo, tutti "vinti") vs `true_equity` (mark-to-market = chiusi + floating delle aperte in perdita). Coerenza verificata: realized + open_floating == true_equity. `wiped`/`wipe_date` se il MTM tocca <=0.
+- Frontend: pannello rosso `nosl-panel` con avviso, risultato `nosl-result`, `nosl-true-equity`, `nosl-wiped`, equity curve MTM.
+- Risultato dimostrativo (dati simulati, MetaApi disconnesso al test): solo chiusi ~€16.473 (85 TP, sembra +65%) MA equity reale MTM ~€10.432 (+4,3%) con -€6.041 di floating aperto → dimostra che l'alto win-rate senza SL è INGANNEVOLE.
+- NOTA RICORRENTE: l'account MetaApi demo (590b1207) si disconnette spesso → i backtest ripiegano su dati SIMULATI (marcati). Riconnettere/riprovare per dati reali.
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.

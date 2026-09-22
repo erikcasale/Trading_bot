@@ -1,0 +1,38 @@
+{
+  "summary": "Tested new No-Stop-Loss compounding backtest feature (POST /api/portfolio/nosl + GET /api/portfolio/backtest/{job_id}) + frontend nosl-panel. All 8 backend pytest cases PASS (20s warm cache): endpoint returns {job_id,status:running,total:7}; GET on unknown id returns 404; response never leaks the asyncio 'task' field; result mode='nosl_compound' with all required fields; closed_trades == tp_wins (no SL => only TP exits); realized_balance + open_floating == true_equity within €5 tolerance (COHERENCE CHECK for the feature's key claim); return_true_percent matches (true-start)/start*100; wiped flag consistent with min_equity<=0. Frontend E2E: login demo, scroll to nosl-panel, click nosl-run-button, waited for nosl-result. Rendered values: Equity reale (MTM) €9090,24 (-9.1%), Solo trade chiusi €12.933,21 (57 TP chiusi), Perdita max -23.19% (min €9090,24), Aperte/Floating 28 / €-3842,97 non realizz. Coherence 12933.21 + (-3842.97) = 9090.24 = true_equity EXACTLY. Equity curve line chart renders. Warning text about deceptive TP-only closing is displayed. sim_symbols banner listed all 7 symbols (MetaApi disconnected during frontend run - ACCEPTABLE per request; logic still verified). nosl-wiped not shown because wiped=false (min_equity stayed positive).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/datasource/status", "issue": "connected=false at test time (MetaApi RPC dropped); nosl fell back to simulated data for all 7 symbols. Feature logic still validated end-to-end as per request instructions."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_nosl.py",
+    "/app/test_reports/pytest/pytest_nosl.xml"
+  ],
+  "action_items": [
+    "No action required for the No-SL feature itself. If real-data validation is needed later, re-establish MetaApi RPC for account 590b1207 and rerun."
+  ],
+  "critical_code_review_comments": [
+    "server.py 1728 lines - still recommend splitting portfolio/nosl/optimize into routers (flagged since iter11).",
+    "_nosl_compute cleanly separates realized (event-driven, compounding lot) from MTM (daily curve) - correct implementation.",
+    "GET /portfolio/backtest/{job_id} strips the 'task' key ({k: v for k, v in job.items() if k != 'task'}) - prevents Task serialization errors. Verified explicitly in test_nosl_no_task_field_in_get.",
+    "NoslReq at line 941 uses _portfolio_jobs before its definition at line 1113; safe because module is fully loaded before any request, but consider moving _portfolio_jobs declaration above the nosl endpoint for readability.",
+    "_nosl_compute correctly clamps min lot to 0.01 and skips new entries when equity<=0, so once realized_balance is wiped no fresh trades sized on zero equity are opened."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_nosl.py"
+  ],
+  "success_rate": {"backend": "100% (8/8 pytest pass)", "frontend": "100% (panel, run, result, true-equity, curve, warning, coherence all verified)"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Feature is fully green with simulated data. Backend tests: /app/backend/tests/test_nosl.py runs ~20s when cache is warm. Do NOT edit backend/server.py during job runs (hot-reload wipes _d1_cache and blows a cold nosl to ~6 min). The job endpoint is idempotent-friendly: POST returns immediately with a job_id, GET polls same endpoint used by portfolio backtest. Sample done result: realized 12933.21 / true 9050.17 / floating -3883.04 / 57 TP / 28 open / wiped=false.",
+  "rca of the issue": "N/A - no defects. MetaApi disconnected state observed but doesn't affect feature validation per review_request note."
+}
