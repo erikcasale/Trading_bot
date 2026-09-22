@@ -37,6 +37,9 @@ export default function ForwardTest({ symbol }) {
   const [discLoading, setDiscLoading] = useState(false);
   const [intraday, setIntraday] = useState({});
   const [intradayAll, setIntradayAll] = useState({ loading: false, done: 0, total: 0 });
+  const [pf, setPf] = useState(null);
+  const [pfState, setPfState] = useState({ loading: false, done: 0, total: 7 });
+  const pfPoll = useRef(null);
   const intradayPoll = useRef(null);
   const discPoll = useRef(null);
   const timer = useRef(null);
@@ -47,7 +50,31 @@ export default function ForwardTest({ symbol }) {
     if (discPoll.current) clearInterval(discPoll.current);
   }, [symbol]);
   useEffect(() => { setIntraday({}); setIntradayAll({ loading: false, done: 0, total: 0 }); }, [res]);
-  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); }, []);
+  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); if (pfPoll.current) clearInterval(pfPoll.current); }, []);
+
+  const runPortfolio = async () => {
+    if (pfPoll.current) clearInterval(pfPoll.current);
+    setPf(null); setPfState({ loading: true, done: 0, total: 7 });
+    try {
+      const { data } = await api.post("/portfolio/backtest", { start_date: "2025-01-01", start_balance: 10000, risk_percent: 1.5 });
+      const jobId = data.job_id;
+      let ticks = 0;
+      pfPoll.current = setInterval(async () => {
+        ticks += 1;
+        try {
+          const { data: st } = await api.get(`/portfolio/backtest/${jobId}`);
+          setPfState({ loading: st.status === "running", done: st.done || 0, total: st.total || 7 });
+          if (st.status === "done") {
+            clearInterval(pfPoll.current); setPf(st.result); setPfState({ loading: false, done: 7, total: 7 });
+            toast.success(`Portafoglio: €${st.result.final_balance.toLocaleString("it-IT")} al ${st.result.end_date}`);
+          } else if (st.status === "error" || ticks > 90) {
+            clearInterval(pfPoll.current); setPfState({ loading: false, done: 0, total: 7 });
+            toast.error(st.error || "Backtest non riuscito");
+          }
+        } catch { /* keep polling */ }
+      }, 4000);
+    } catch { setPfState({ loading: false, done: 0, total: 7 }); toast.error("Impossibile avviare il backtest"); }
+  };
 
   const isDaily = res && (res.timeframe === "D1" || res.timeframe === "D");
 
@@ -291,6 +318,82 @@ export default function ForwardTest({ symbol }) {
               <FastForward className="w-3.5 h-3.5" /> Salta alla fine
             </button>
           </>
+        )}
+      </div>
+
+      {/* Portfolio backtest — shared 10k account, multiple instruments, from 2025 */}
+      <div data-testid="portfolio-panel" className="mb-3 rounded-lg border border-[#8B5CF6]/40 bg-[#8B5CF6]/5 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-[#A78BFA]" />
+            <span className="font-head font-bold text-sm">Backtest Portafoglio</span>
+            <span className="overline">€10k · dal 1 gen 2025 · 7 strumenti · posizioni multiple</span>
+          </div>
+          <button data-testid="portfolio-run-button" onClick={runPortfolio} disabled={pfState.loading}
+            className="inline-flex items-center gap-1.5 bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+            {pfState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Layers className="w-3.5 h-3.5" />}
+            {pfState.loading ? `Scarico dati ${pfState.done}/${pfState.total}…` : "Avvia backtest portafoglio"}
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
+          Parte da <b className="text-white">€10.000</b> il <b className="text-white">1 gennaio 2025</b> e opera fino a oggi su 7 strumenti con conto condiviso e posizioni multiple.
+          La strategia di ogni strumento è scelta <b className="text-white">solo su dati PRIMA del 2025</b> (nessun look-ahead), poi applicata in avanti. Rischio 1,5% per trade.
+          {pfState.loading && <span className="text-[#A78BFA]"> Primo avvio ~2-3 min (scarico 5 anni × 7 strumenti).</span>}
+        </p>
+
+        {pf && (
+          <div data-testid="portfolio-result" className="mt-3 space-y-3 fade-up">
+            {pf.sim_symbols?.length > 0 && (
+              <div className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/10 border border-[#F59E0B]/40 rounded-lg p-2 leading-relaxed">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{pf.sim_symbols.join(", ")}: dati simulati (broker non raggiungibile durante lo scarico). Riprova per averli reali.</span>
+              </div>
+            )}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <BigStat label="Saldo finale" value={`€${pf.final_balance.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} color={pf.net_profit >= 0 ? "#10B981" : "#EF4444"} testid="portfolio-final-balance" />
+              <BigStat label="Rendimento" value={`${pf.return_percent >= 0 ? "+" : ""}${pf.return_percent}%`} sub={`${pf.annualized_percent}%/anno`} color={pf.return_percent >= 0 ? "#10B981" : "#EF4444"} />
+              <BigStat label="Max Drawdown" value={`${pf.max_drawdown}%`} color="#F59E0B" />
+              <BigStat label="Trade · WR" value={`${pf.total_trades}`} sub={`${pf.winrate}% win · ${pf.open_trades} aperti`} color="#0EA5E9" />
+            </div>
+            <div className="text-[11px] font-mono text-[#64748B]">
+              {pf.start_date} → {pf.end_date} · {pf.days} giorni · capitale iniziale €{pf.start_balance.toLocaleString("it-IT")} · rischio {pf.risk_percent}%/trade
+            </div>
+            <ResponsiveContainer width="100%" height={110}>
+              <LineChart data={pf.equity_curve.map((e, i) => ({ i, e }))}>
+                <YAxis domain={["dataMin", "dataMax"]} hide />
+                <Line type="monotone" dataKey="e" stroke="#A78BFA" strokeWidth={1.8} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+            <div className="rounded-lg border border-[#1E293B] bg-[#0B0E17] overflow-x-auto">
+              <table data-testid="portfolio-symbols-table" className="w-full text-left text-xs font-mono">
+                <thead className="text-[#64748B] border-b border-[#1E293B]">
+                  <tr>
+                    <th className="py-1.5 px-2 font-normal">Strumento</th>
+                    <th className="py-1.5 px-2 font-normal">Strategia</th>
+                    <th className="py-1.5 px-2 font-normal text-right">Trade</th>
+                    <th className="py-1.5 px-2 font-normal text-right">P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pf.per_symbol.map((s) => (
+                    <tr key={s.symbol} className="border-b border-[#1E293B]/50">
+                      <td className="py-1.5 px-2 font-semibold flex items-center gap-1.5">
+                        {s.symbol}
+                        {pf.sim_symbols?.includes(s.symbol) && <span className="text-[8px] px-1 rounded bg-[#F59E0B]/15 text-[#F59E0B]">SIM</span>}
+                      </td>
+                      <td className="py-1.5 px-2 text-[#94A3B8]">{s.entry_label}</td>
+                      <td className="py-1.5 px-2 text-right">{s.trades}</td>
+                      <td className={`py-1.5 px-2 text-right font-semibold ${s.net >= 0 ? "text-up" : "text-down"}`}>
+                        {s.net >= 0 ? "+" : ""}€{s.net.toLocaleString("it-IT")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] text-[#475569] leading-relaxed">
+              Backtest su dati storici reali con costi (spread) inclusi e strategia scelta senza look-ahead. Le performance passate non garantiscono risultati futuri.
+            </p>
+          </div>
         )}
       </div>
 
@@ -714,6 +817,16 @@ function Stat({ icon: Icon, label, value, color, testid }) {
       <div className="flex items-center gap-1 mb-1"><Icon className="w-3 h-3" style={{ color }} />
         <span className="overline">{label}</span></div>
       <div className="font-mono text-base font-bold" style={{ color }}>{value}</div>
+    </div>
+  );
+}
+
+function BigStat({ label, value, sub, color, testid }) {
+  return (
+    <div data-testid={testid} className="rounded-lg border border-[#1E293B] bg-[#0B0E17] p-2.5">
+      <div className="overline mb-1">{label}</div>
+      <div className="font-mono text-lg font-bold leading-tight" style={{ color: color || "#F8FAFC" }}>{value}</div>
+      {sub && <div className="font-mono text-[10px] text-[#64748B] mt-0.5">{sub}</div>}
     </div>
   );
 }
