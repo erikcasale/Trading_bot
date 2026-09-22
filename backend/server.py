@@ -943,6 +943,7 @@ class NoslReq(BaseModel):
     start_balance: float = 10000.0
     lot_per_10k: float = 0.1
     max_concurrent: int = 10
+    engine: str = "meanrev"  # "meanrev" (improved) | "classic" (legacy trend/breakout)
 
 
 @api_router.post("/portfolio/nosl")
@@ -970,7 +971,8 @@ async def _run_nosl(job_id, body):
             candles, source = await _get_d1_history(sym, want)
             if source == "real":
                 data[sym] = (candles, source)
-        result = await asyncio.to_thread(_nosl_compute, data, body.start_date,
+        engine = _nosl_v2_compute if body.engine == "meanrev" else _nosl_compute
+        result = await asyncio.to_thread(engine, data, body.start_date,
                                          body.start_balance, body.lot_per_10k,
                                          body.max_concurrent)
         if result is None:
@@ -982,74 +984,32 @@ async def _run_nosl(job_id, body):
         _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
 
 
-def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=10):
-    try:
-        start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
-    except Exception:
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+def _pt(iso):
+    return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
 
-    def pt(iso):
-        return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
 
-    positions, real_syms, sim_syms = [], [], []
-    price_on, all_dates, sym_strategy = {}, set(), {}
-    for sym, (candles, source) in data.items():
-        if not candles or len(candles) < 200:
-            continue
-        (real_syms if source == "real" else sim_syms).append(sym)
-        cfg = INSTRUMENTS[sym]
-        contract = CONTRACT_SIZE.get(sym, 100000)
-        train = [c for c in candles if pt(c["time"]) < start]
-        if len(train) < 120:
-            continue
-        params = _pick_params(train, cfg)
-        if params is None:
-            continue
-        sym_strategy[sym] = {
-            "label": ENTRY_LABELS.get(params["entry"], params["entry"]),
-            "entry": params["entry"], "tp_mult": params["tp_mult"],
-            "trend_filter": params.get("trend_filter", False), "rsi": params.get("rsi", False),
-        }
-        price_on[sym] = {}
-        for c in candles:
-            d = pt(c["time"]).date()
-            price_on[sym][d] = c["c"]
-            if pt(c["time"]) >= start:
-                all_dates.add(d)
-        full = run_forward_test(candles, cfg, 1.0, params=params)
-        last_c = candles[-1]
-        for t in full["trades"]:
-            try:
-                ei = t["entry_index"]
-                et = pt(t["entry_time"])
-            except Exception:
-                continue
-            if et < start:
-                continue
-            side, entry, tp = t["side"], t["entry"], t["tp"]
-            direction = 1 if side == "BUY" else -1
-            # NO stop loss: close only when TP is touched, else stay open to the end
-            exit_price, exit_t, is_open = last_c["c"], pt(last_c["time"]), True
-            for j in range(ei + 1, len(candles)):
-                cj = candles[j]
-                if (side == "BUY" and cj["h"] >= tp) or (side == "SELL" and cj["l"] <= tp):
-                    exit_price, exit_t, is_open = tp, pt(candles[j + 1]["time"]) if j + 1 < len(candles) else pt(cj["time"]), False
-                    break
-            positions.append({"sym": sym, "side": side, "dir": direction, "entry": entry,
-                              "tp": tp, "entry_t": et, "exit_t": exit_t, "exit": exit_price,
-                              "contract": contract, "open": is_open,
-                              "last_price": last_c["c"], "digits": cfg.get("digits", 5)})
+def _bar_close(candles, i):
+    """A bar's close prints at the next bar's open — the real moment of the close."""
+    return candles[i + 1]["time"] if i + 1 < len(candles) else candles[i]["time"]
+
+
+def _atr_at(candles, i, period=14):
+    win = candles[max(0, i - period):i]
+    return (sum(c["h"] - c["l"] for c in win) / len(win)) if win else 0.0
+
+
+def _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_balance,
+                 lot_per_10k, max_concurrent, real_syms, sim_syms, mode, extra=None):
+    """Shared no-SL settlement: event-driven COMPOUNDING equity, mark-to-market
+    equity curve (floating of open trades included), open-position detail."""
     if not positions:
         return None
-
-    # event-driven realized equity with COMPOUNDING lot sizing
     events = []
     for p in positions:
         events.append((p["entry_t"], 0, p))
         events.append((p["exit_t"], 1, p))
     events.sort(key=lambda e: (e[0], e[1]))
-    equity, wiped, wipe_date = start_balance, False, None
-    open_count = 0
+    equity, open_count = start_balance, 0
     for tm, typ, p in events:
         if typ == 0:
             if equity <= 0 or open_count >= max_concurrent:
@@ -1062,18 +1022,16 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
                 continue
             open_count -= 1
             if p["open"]:
-                continue  # open trades stay floating; only closed TP trades hit realized
+                continue  # open trades stay floating; only closed trades hit realized
             p["pnl"] = round(p["lot"] * p["contract"] * (p["exit"] - p["entry"]) * p["dir"], 2)
             equity += p["pnl"]
     realized_final = round(equity, 2)
 
-    # daily MARK-TO-MARKET equity (floating of open no-SL trades included)
     sym_net = {}
     for p in positions:
         if not p.get("skip") and "pnl" in p:
             sym_net[p["sym"]] = round(sym_net.get(p["sym"], 0) + p["pnl"], 2)
-    curve, peak, max_dd, min_eq = [], start_balance, 0.0, start_balance
-    wipe_date = None
+    curve, peak, max_dd, min_eq, wipe_date = [], start_balance, 0.0, start_balance, None
     for d in sorted(all_dates):
         realized = sum(p["pnl"] for p in positions if not p.get("skip") and "pnl" in p and p["exit_t"].date() <= d)
         floating = 0.0
@@ -1094,27 +1052,26 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
     wiped = wipe_date is not None
     true_final = curve[-1] if curve else realized_final
 
-    closed = [p for p in positions if not p.get("skip") and not p["open"]]
-    open_p = [p for p in positions if not p.get("skip") and p["open"]]
+    used = [p for p in positions if not p.get("skip")]
+    closed = [p for p in used if not p["open"]]
+    open_p = [p for p in used if p["open"]]
+    tp_wins = [p for p in closed if not p.get("timed")]
+    timed_exits = [p for p in closed if p.get("timed")]
     open_float = round(sum((price_on[p["sym"]][max(price_on[p["sym"]])] - p["entry"]) * p["dir"] * p["lot"] * p["contract"]
                            for p in open_p if p.get("lot")), 2)
     per_symbol = sorted([{"symbol": s, "net": n} for s, n in sym_net.items()], key=lambda x: -x["net"])
     end = max((p["exit_t"] for p in positions), default=start)
 
-    def _last_px(p):
-        return price_on[p["sym"]][max(price_on[p["sym"]])]
-
     open_detail = []
     for p in open_p:
         if not p.get("lot"):
             continue
-        cur = _last_px(p)
+        cur = price_on[p["sym"]][max(price_on[p["sym"]])]
         flo = round((cur - p["entry"]) * p["dir"] * p["lot"] * p["contract"], 2)
         strat = sym_strategy.get(p["sym"], {})
         dg = p.get("digits", 5)
-        # % of the intended distance to TP still missing (how far offside the trade is)
         tp_dist = abs(p["tp"] - p["entry"]) or 1e-9
-        adverse = (p["entry"] - cur) * p["dir"]  # >0 means price moved against us
+        adverse = (p["entry"] - cur) * p["dir"]
         open_detail.append({
             "symbol": p["sym"], "side": p["side"], "strategy": strat.get("label", ""),
             "entry_rule": strat.get("entry", ""), "entry_date": p["entry_t"].date().isoformat(),
@@ -1123,8 +1080,8 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
             "adverse_move_pct": round(adverse / tp_dist * 100, 1),
         })
     open_detail.sort(key=lambda x: x["floating"])
-    return {
-        "mode": "nosl_compound", "start_date": start.date().isoformat(),
+    result = {
+        "mode": mode, "start_date": start.date().isoformat(),
         "end_date": end.date().isoformat(), "start_balance": round(start_balance, 2),
         "lot_per_10k": lot_per_10k, "max_concurrent": max_concurrent,
         "realized_balance": realized_final,
@@ -1132,12 +1089,210 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
         "return_true_percent": round((true_final - start_balance) / start_balance * 100, 1),
         "max_drawdown": round(max_dd, 2), "min_equity": round(min_eq, 2),
         "wiped": wiped, "wipe_date": wipe_date,
-        "closed_trades": len(closed), "tp_wins": len(closed),
+        "closed_trades": len(closed), "tp_wins": len(tp_wins), "timed_exits": len(timed_exits),
         "open_trades": len(open_p), "open_floating": open_float,
         "per_symbol": per_symbol, "real_symbols": real_syms, "sim_symbols": sim_syms,
         "sym_strategy": sym_strategy, "open_positions": open_detail,
         "equity_curve": curve,
     }
+    if extra:
+        result.update(extra)
+    return result
+
+
+def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=10):
+    try:
+        start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
+    except Exception:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    positions, real_syms, sim_syms = [], [], []
+    price_on, all_dates, sym_strategy = {}, set(), {}
+    for sym, (candles, source) in data.items():
+        if not candles or len(candles) < 200:
+            continue
+        (real_syms if source == "real" else sim_syms).append(sym)
+        cfg = INSTRUMENTS[sym]
+        contract = CONTRACT_SIZE.get(sym, 100000)
+        train = [c for c in candles if _pt(c["time"]) < start]
+        if len(train) < 120:
+            continue
+        params = _pick_params(train, cfg)
+        if params is None:
+            continue
+        sym_strategy[sym] = {
+            "label": ENTRY_LABELS.get(params["entry"], params["entry"]),
+            "entry": params["entry"], "tp_mult": params["tp_mult"],
+            "trend_filter": params.get("trend_filter", False), "rsi": params.get("rsi", False),
+        }
+        price_on[sym] = {}
+        for c in candles:
+            d = _pt(c["time"]).date()
+            price_on[sym][d] = c["c"]
+            if _pt(c["time"]) >= start:
+                all_dates.add(d)
+        full = run_forward_test(candles, cfg, 1.0, params=params)
+        last_c = candles[-1]
+        for t in full["trades"]:
+            try:
+                ei = t["entry_index"]
+                et = _pt(t["entry_time"])
+            except Exception:
+                continue
+            if et < start:
+                continue
+            side, entry, tp = t["side"], t["entry"], t["tp"]
+            direction = 1 if side == "BUY" else -1
+            exit_price, exit_t, is_open = last_c["c"], _pt(last_c["time"]), True
+            for j in range(ei + 1, len(candles)):
+                cj = candles[j]
+                if (side == "BUY" and cj["h"] >= tp) or (side == "SELL" and cj["l"] <= tp):
+                    exit_price, exit_t, is_open = tp, _pt(candles[j + 1]["time"]) if j + 1 < len(candles) else _pt(cj["time"]), False
+                    break
+            positions.append({"sym": sym, "side": side, "dir": direction, "entry": entry,
+                              "tp": tp, "entry_t": et, "exit_t": exit_t, "exit": exit_price,
+                              "contract": contract, "open": is_open,
+                              "last_price": last_c["c"], "digits": cfg.get("digits", 5)})
+    return _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_balance,
+                        lot_per_10k, max_concurrent, real_syms, sim_syms, "nosl_compound")
+
+
+# ---- Improved no-SL engine: mean-reversion + 200-SMA regime filter + time-stop ----
+def _mr_trades(candles, cfg, params):
+    """Mean-reversion signals (RSI extremes, in the direction of the SMA200 regime),
+    take-profit at ATR*tp, and a TIME-STOP (close after N bars if TP not hit).
+    NO price stop loss. One position at a time. Returns settled trade dicts."""
+    rlen, buy_thr, sell_thr = params["rsi_len"], params["buy_thr"], params["sell_thr"]
+    tp_atr, tstop, regime = params["tp_atr"], params["time_stop"], params["regime"]
+    d = cfg["digits"]
+    closes = [c["c"] for c in candles]
+    trades, open_t = [], None
+    n = len(candles)
+    for i in range(n):
+        c = candles[i]
+        if open_t is not None:
+            side, tp = open_t["side"], open_t["tp"]
+            hit = (side == "BUY" and c["h"] >= tp) or (side == "SELL" and c["l"] <= tp)
+            timed = (i - open_t["entry_index"]) >= tstop
+            if hit or timed:
+                open_t["exit_index"] = i
+                open_t["exit"] = round(tp if hit else c["c"], d)
+                open_t["exit_time"] = _bar_close(candles, i)
+                open_t["open"] = False
+                open_t["timed"] = bool(timed and not hit)
+                trades.append(open_t)
+                open_t = None
+        if open_t is None and i >= 200:
+            r = _rsi(closes[:i + 1], rlen)
+            sma200 = _mean(closes[i - 200:i + 1])
+            atr = _atr_at(candles, i, 14) or cfg["vol"]
+            price = c["c"]
+            sig = None
+            if regime:
+                if price > sma200 and r < buy_thr:
+                    sig = "BUY"
+                elif price < sma200 and r > sell_thr:
+                    sig = "SELL"
+            else:
+                if r < buy_thr:
+                    sig = "BUY"
+                elif r > sell_thr:
+                    sig = "SELL"
+            if sig and atr > 0:
+                entry = price
+                tp = entry + atr * tp_atr if sig == "BUY" else entry - atr * tp_atr
+                open_t = {"entry_index": i, "entry_time": _bar_close(candles, i),
+                          "side": sig, "entry": round(entry, d), "tp": round(tp, d), "open": True}
+    if open_t is not None:
+        open_t["exit_index"] = n - 1
+        open_t["exit"] = round(candles[-1]["c"], d)
+        open_t["exit_time"] = _bar_close(candles, n - 1)
+        open_t["open"] = True
+        open_t["timed"] = False
+        trades.append(open_t)
+    return trades
+
+
+_MR_GRID = [
+    {"rsi_len": rl, "buy_thr": bt, "sell_thr": 100 - bt, "tp_atr": tp, "time_stop": ts, "regime": rg}
+    for rl in (2, 3)
+    for bt in (5, 10, 15)
+    for tp in (1.0, 1.5, 2.0)
+    for ts in (10, 20, 30)
+    for rg in (True, False)
+]
+
+
+def _mr_pick(train, cfg):
+    """Choose mean-reversion params on the training slice (no look-ahead).
+    Score = realized net / max realized drawdown, only if net>0 and >=8 trades."""
+    contract = CONTRACT_SIZE.get(cfg.get("_sym", ""), 100000)
+    best = None
+    for params in _MR_GRID:
+        trs = [t for t in _mr_trades(train, cfg, params) if not t["open"]]
+        if len(trs) < 8:
+            continue
+        eq, peak, dd, net = 10000.0, 10000.0, 0.0, 0.0
+        for t in trs:
+            dirn = 1 if t["side"] == "BUY" else -1
+            pnl = 0.1 * contract * (t["exit"] - t["entry"]) * dirn
+            net += pnl
+            eq += pnl
+            peak = max(peak, eq)
+            dd = max(dd, peak - eq)
+        if net <= 0:
+            continue
+        score = net / max(dd, 1.0)
+        if best is None or score > best[0]:
+            best = (score, params)
+    return best[1] if best else None
+
+
+def _nosl_v2_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=10):
+    try:
+        start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
+    except Exception:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    positions, real_syms, sim_syms = [], [], []
+    price_on, all_dates, sym_strategy = {}, set(), {}
+    for sym, (candles, source) in data.items():
+        if not candles or len(candles) < 250:
+            continue
+        (real_syms if source == "real" else sim_syms).append(sym)
+        cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
+        contract = CONTRACT_SIZE.get(sym, 100000)
+        train = [c for c in candles if _pt(c["time"]) < start]
+        if len(train) < 250:
+            continue
+        params = _mr_pick(train, cfg)
+        if params is None:
+            continue
+        sym_strategy[sym] = {
+            "label": "Mean-Reversion + time-stop", "entry": "meanrev_rsi",
+            "rsi_len": params["rsi_len"], "buy_thr": params["buy_thr"],
+            "tp_atr": params["tp_atr"], "time_stop": params["time_stop"],
+            "regime": params["regime"],
+        }
+        price_on[sym] = {}
+        for c in candles:
+            dd = _pt(c["time"]).date()
+            price_on[sym][dd] = c["c"]
+            if _pt(c["time"]) >= start:
+                all_dates.add(dd)
+        for t in _mr_trades(candles, cfg, params):
+            et = _pt(t["entry_time"])
+            if et < start:
+                continue
+            direction = 1 if t["side"] == "BUY" else -1
+            positions.append({"sym": sym, "side": t["side"], "dir": direction,
+                              "entry": t["entry"], "tp": t["tp"], "entry_t": et,
+                              "exit_t": _pt(t["exit_time"]), "exit": t["exit"],
+                              "contract": contract, "open": t["open"],
+                              "timed": t.get("timed", False),
+                              "last_price": candles[-1]["c"], "digits": cfg["digits"]})
+    return _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_balance,
+                        lot_per_10k, max_concurrent, real_syms, sim_syms, "nosl_meanrev")
 
 
 class PortfolioReq(BaseModel):

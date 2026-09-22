@@ -84,7 +84,7 @@ export default function ForwardTest({ symbol }) {
     if (noslPoll.current) clearInterval(noslPoll.current);
     setNosl(null); setNoslState({ loading: true, done: 0, total: 5 });
     try {
-      const { data } = await api.post("/portfolio/nosl", { start_date: "2026-01-01", start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10 });
+      const { data } = await api.post("/portfolio/nosl", { start_date: "2026-01-01", start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10, engine: "meanrev" });
       const jobId = data.job_id;
       let ticks = 0;
       noslPoll.current = setInterval(async () => {
@@ -389,7 +389,7 @@ export default function ForwardTest({ symbol }) {
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-[#EF4444]" />
             <span className="font-head font-bold text-sm">Test SENZA Stop Loss</span>
-            <span className="overline">2026 · solo forex · max 10 aperte · size composta 0,1 lotti / €10k · €10k</span>
+            <span className="overline">2026 · mean-reversion + time-stop · solo forex · max 10 aperte · size composta 0,1/€10k</span>
           </div>
           <button data-testid="nosl-run-button" onClick={runNosl} disabled={noslState.loading}
             className="inline-flex items-center gap-1.5 bg-[#EF4444] hover:bg-[#DC2626] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
@@ -398,8 +398,7 @@ export default function ForwardTest({ symbol }) {
           </button>
         </div>
         <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
-          Nessuno stop loss: le posizioni in perdita <b className="text-[#EF4444]">restano aperte</b> finché non tornano in profitto (o mai). La size cresce col conto (0,1 lotti ogni €10k → interesse composto).
-          Solo forex (5 major), <b className="text-white">massimo 10 posizioni contemporanee</b>. Mostriamo l'<b className="text-white">equity reale mark-to-market</b> (incluse le perdite aperte), non solo i trade chiusi: è così che si vede il rischio vero di questo approccio.
+          <b className="text-white">Nessuno stop loss di prezzo.</b> Per evitare i perdenti incagliati, il motore usa <b className="text-white">mean-reversion</b> (compra gli eccessi ribassisti / vende quelli rialzisti, RSI) con un <b className="text-white">time-stop</b>: se il trade non raggiunge il take-profit entro N giorni viene chiuso comunque. Solo forex, size composta 0,1 lotti ogni €10k. Mostriamo l'<b className="text-white">equity reale mark-to-market</b>: è così che si vede il rischio vero.
         </p>
 
         {nosl && (
@@ -417,7 +416,7 @@ export default function ForwardTest({ symbol }) {
             )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <BigStat testid="nosl-true-equity" label="Equity reale (MTM)" value={`€${nosl.true_equity.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} sub={`${nosl.return_true_percent >= 0 ? "+" : ""}${nosl.return_true_percent}%`} color={nosl.net_true >= 0 ? "#10B981" : "#EF4444"} />
-              <BigStat label="Solo trade chiusi" value={`€${nosl.realized_balance.toLocaleString("it-IT")}`} sub={`${nosl.tp_wins} TP chiusi`} color="#0EA5E9" />
+              <BigStat label="Solo trade chiusi" value={`€${nosl.realized_balance.toLocaleString("it-IT")}`} sub={`${nosl.tp_wins} TP${nosl.timed_exits != null ? ` · ${nosl.timed_exits} time-stop` : ""}`} color="#0EA5E9" />
               <BigStat label="Perdita max (MTM)" value={`-${nosl.max_drawdown}%`} sub={`minimo €${nosl.min_equity.toLocaleString("it-IT")}`} color="#EF4444" />
               <BigStat label="Aperte / Floating" value={`${nosl.open_trades}`} sub={`${nosl.open_floating >= 0 ? "+" : ""}€${nosl.open_floating.toLocaleString("it-IT")} non realizz.`} color="#F59E0B" />
             </div>
@@ -470,7 +469,7 @@ export default function ForwardTest({ symbol }) {
               </div>
             )}
             <p className="text-[10px] text-[#EF4444] leading-relaxed">
-              ⚠️ I "trade chiusi" possono sembrare quasi tutti vincenti (chiudono solo al TP), ma le perdite restano aperte e affondano l'equity reale. Un alto tasso di vincite qui è ingannevole: conta l'equity mark-to-market. Approccio ad altissimo rischio, a scopo dimostrativo.
+              ⚠️ Il time-stop chiude i perdenti che non rientrano, così l'equity reale resta vicina al saldo dei trade chiusi (niente perdite floating che si accumulano per mesi). Resta comunque un approccio senza rete di protezione di prezzo: un movimento contrario molto forte entro il time-stop può ancora far male. Nessuna performance qui è una garanzia futura.
             </p>
           </div>
         )}

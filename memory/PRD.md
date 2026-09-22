@@ -66,6 +66,17 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - Coerenza contabile: 11.577,29 + (-3.032,14) = 8.545,15 = true_equity. ✓
 - CONFRONTO: senza cap e con XAU/US30 → conto azzerato (-€149k floating). Con cap 10 + solo forex → il conto sopravvive ma perde comunque -14,5% in equity reale nonostante 13/13 trade chiusi "vinti". Il no-SL resta perdente in termini di equity reale.
 
+## Motore no-SL MIGLIORATO: mean-reversion + regime SMA200 + time-stop (2026-06) — DATI REALI 5/5
+- Richiesta utente: "a me interessa il risultato, libertà su strategie/algoritmi (anche da ricerca online). Regole non negoziabili: NO Stop Loss; size 0,1 lotti/€10k con interesse composto."
+- Ricerca online: senza SL la mean-reversion batte il trend-following (i perdenti rientrano invece di scappare); servono un filtro di regime (SMA200) e un TIME-STOP (chiudere dopo N barre se il TP non è colpito) per non lasciare capitale bloccato.
+- Implementazione (`server.py`):
+  - Estratto `_nosl_settle()` (settlement condiviso: equity compounding event-driven, curva MTM, dettaglio posizioni aperte). Helper `_pt`, `_bar_close`, `_atr_at`.
+  - Nuovo motore `_nosl_v2_compute` + `_mr_trades` (entry RSI2/3 su eccessi, TP=ATR×mult, TIME-STOP a N giorni, NO price SL, 1 posizione/simbolo) + `_mr_pick` (grid `_MR_GRID` 108 combo: rsi_len×soglia×tp_atr×time_stop×regime, scelta su dati PRE-2026, score net/DD).
+  - `NoslReq.engine` ("meanrev" default | "classic" legacy). `_run_nosl` instrada al motore scelto. Nuovi campi risultato: `timed_exits`, `sym_strategy` (params mean-reversion).
+  - Frontend `ForwardTest.jsx`: il pulsante no-SL usa engine "meanrev"; label "mean-reversion + time-stop"; stat "Solo trade chiusi" mostra "N TP · M time-stop"; testi aggiornati.
+- RISULTATO REALE 5/5 (vs motore classico): true equity €10.461 (+4,6%) vs €8.545 (-14,5%); maxDD MTM 6,8% vs 19,46%; equity minima €9.454 vs €8.060; solo 5 posizioni aperte (tutte aperte ad ago/set, floating -€576, peggiore -€219) vs 10 incagliate da gennaio (floating -€3.024, peggiore -€598). 55 chiusi = 28 TP + 27 time-stop → il time-stop taglia i perdenti prima che si incaglino. Identità contabile: 11.037,01 − 575,96 = 10.461,05 = true equity. ✓
+- ONESTÀ: il no-SL resta senza rete di protezione di prezzo (un movimento contrario forte entro il time-stop può ancora far male) e USD/CAD/USD/CHF restano net negativi; ma il portafoglio è net positivo e molto più sicuro. Nessuna garanzia futura.
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.
