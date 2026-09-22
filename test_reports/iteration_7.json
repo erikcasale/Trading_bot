@@ -1,0 +1,32 @@
+{
+  "summary": "Tested new OUT-OF-SAMPLE (walk-forward) validation feature end-to-end. Backend: 10/10 pytest cases passed (EUR/USD real source, USD/CHF+US30+GBP/USD multi-symbol, invalid symbol -> 404, insufficient data -> 200/422 no 500, disjoint+consecutive slices, concurrency: datasource/status returned in <2s while OOS ran, verdict-logic correctness, regressions on /optimize, /forwardtest/run, /market/watchlist=11). Frontend: demo login OK, optimizer-oos-button renders in Ottimizzatore, clicking it produces oos-result within ~5-10s with oos-verdict-badge=FRAGILE (expected/correct behavior demonstrating overfitting), both 'In-Sample (studio)' and 'Out-of-Sample (mai visto)' columns with WR/PF/Annua/DD/Trade + date ranges + mini equity curves and colored explanation note. Regression: optimizer-run-button + optimizer-apply-button still work; switching watchlist symbol clears BOTH oos-result and optimizer-apply block.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "ForwardTest OOS toast", "issues": ["On success, ForwardTest.jsx line ~85 uses toast.error(`Validazione OOS: strategia ${verdict.toUpperCase()}`) — a red/error toast is shown even when verdict is 'robusta' or 'incerta'. Consider toast.success for robusta, toast.warning for fragile, toast.info for incerta. Minor UX only."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_optimize_oos.py",
+    "/app/test_reports/pytest/oos_results.xml"
+  ],
+  "action_items": [
+    "(Optional/UX) Use verdict-specific toast variant in ForwardTest.jsx runOos() instead of toast.error for all outcomes."
+  ],
+  "critical_code_review_comments": [
+    "server.py:839 clamps bars to [300,800] — but /optimize/oos with bars=300 on D1 still yields is=210/oos=90 which passes _optimize_oos_compute's 150/90 minimums, so the 'insufficient data -> 422' case in the spec cannot easily be triggered via request payload alone. Test asserts 200|422 (no 500) which passes; still, real 422 branch is only reachable if MetaApi returns <260 candles or generator produces short data. Consider allowing smaller bars or adding explicit early guard.",
+    "_optimize_oos_compute correctly runs on asyncio.to_thread — verified concurrent GET /datasource/status stayed <2s during long OOS run.",
+    "server.py is 962 lines — file-size threshold (>700) exceeded; consider splitting into routers/services modules.",
+    "ForwardTest.jsx: runOos uses toast.error even for non-failure verdicts (see design_issues)."
+  ],
+  "updated_files": ["/app/backend/tests/test_optimize_oos.py"],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% of tested flows"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "OOS feature (POST /api/optimize/oos + optimizer-oos-button/oos-result/oos-verdict-badge) is fully working. FRAGILE verdict on EUR/USD H1 is expected. Backend tests live at /app/backend/tests/test_optimize_oos.py. Pytest must be run with `-n 0` for serial (per pytest.ini note) and REACT_APP_BACKEND_URL exported from frontend/.env.",
+  "rca of the issue": "N/A — no bugs found; feature works as designed."
+}

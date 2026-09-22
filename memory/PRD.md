@@ -28,6 +28,7 @@ Posizione onesta comunicata: nessun sistema garantisce 98%/85%/+50%. Costruito c
 - Aggiunte 5 major forex complete: EUR/USD, GBP/USD, USD/CHF, USD/CAD, AUD/USD (watchlist 11 strumenti), con mapping MetaApi.
 - Affidabilità dati reali: `metaapi_service.fetch_candles` con retry + riconnessione (niente fallback silenzioso al simulato).
 - Ottimizzatore spostato off-loop via `asyncio.to_thread` (`_optimize_compute`): il grid ~72 combo non blocca più l'event loop (richieste concorrenti ~100-500ms, no 502 sotto carico).
+- Validazione Out-of-Sample (`/api/optimize/oos`): split storico in-sample/out-of-sample (default 70/30), ottimizza solo sull'in-sample e applica la stessa config sull'out-of-sample; verdetto robusta/fragile/incerta con confronto WR/PF/rendita/DD e due equity curve. Smaschera l'overfitting (es. EUR/USD e USD/CHF FRAGILE, US30 ROBUSTA). Verificato iterazione 7 (10/10).
 
 ## Note di onestà (fondamentali)
 - Winrate alto è reale ma NON implica profitto (vedi PF/expectancy).
