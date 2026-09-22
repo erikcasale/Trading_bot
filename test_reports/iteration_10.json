@@ -1,0 +1,25 @@
+{
+  "summary": "Iteration 10 validated the new multi-instrument PORTFOLIO BACKTEST feature end-to-end. Backend pytest: 6/6 passed (/app/backend/tests/test_portfolio.py) in 16s once the D1 cache was warm. POST /api/portfolio/backtest returns {job_id,status:'running',total:7}; GET /api/portfolio/backtest/{id} progresses done 0->7 then flips to 'done' with a full result object. Unknown job_id returns 404. /api/datasource/status connected:true (Tickmill new account 590b1207); /api/bot returns account.real:true with EUR currency and account.positions[]. Portfolio result on real data: start_balance €10.000 (2025-01-01) -> final €11.990,71 (+19.9%, +11.6% annualized) in 628 days, 206 trades, WR 37.4%, MaxDD 27.38%, 6 open trades at cutoff. real_symbols = all 7 (EUR/USD, GBP/USD, USD/CHF, USD/CAD, AUD/USD, XAU/USD, US30), sim_symbols = []. Consistency: sum(per_symbol.net) = 1990.76 ≈ net_profit 1990.71 (< €0.10 delta); final_balance = start_balance + net_profit exact. Per-symbol chosen strategies (no look-ahead, trained pre-2025): XAU MeanRev +€2889.59, USD/CHF Breakout +€772.75, EUR/USD Trend +€236.70, AUD/USD Trend +€98.13, USD/CAD Trend -€441.50, US30 Breakout -€574.75, GBP/USD Breakout -€990.16 — realistic mixed outcome, no overfit-perfect equity. Frontend Playwright: login demo -> portfolio-panel visible -> portfolio-run-button click -> portfolio-result appears -> portfolio-final-balance shows 'Saldo finale€11.990,71' -> portfolio-symbols-table has exactly 7 rows -> account-balance-badge click opens account-detail-panel with real positions. Zero console errors. Header shows portfolio badge '€11.990,71 al 2026-09-21' next to live equity €9,998.87 REALE. First cold run took >5min (D1 5y fetch for 7 symbols sequential) — cache TTL 600s makes subsequent runs <15s. NOTE: initial pytest attempt failed on 2 tests due to backend hot-reload triggered by saving the test file mid-run, which purged the _d1_cache; rerun after warm-up passed 6/6 cleanly.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_portfolio.py",
+    "/app/test_reports/pytest/iter10_portfolio.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py: portfolio D1 fetch is SEQUENTIAL for 7 symbols — cold-cache first run is 3-6 min. Fine (documented tradeoff to avoid MetaApi connection resets), but consider a small persistent disk cache so a container restart doesn't wipe the 5y history and force another cold pull.",
+    "server.py:970 _run_portfolio uses `asyncio.create_task(...)` without holding a reference (same issue flagged in iter9 for _run_discover) — GC can cancel it. Store task on the job dict.",
+    "_portfolio_jobs is in-memory only with a soft-cap eviction; on backend hot-reload (any file change under backend/) the job dict is wiped and the frontend polling on a stale job_id will 404. Not a real production issue but affects DX during development.",
+    "PORTFOLIO_SYMBOLS is a module-level constant (7 hard-coded pairs). No API to override, no way to exclude one from a user's request. Consider making it a request body param with a default.",
+    "_portfolio_compute grid is 96 combos * 7 symbols = 672 evaluations pre-2025, run in a single thread via asyncio.to_thread. On the current data it took <2s after fetch, so fine, but worth noting for future symbol expansion."
+  ],
+  "updated_files": ["/app/backend/tests/test_portfolio.py (new)"],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100% of tested flows"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Portfolio backtest works end-to-end with real Tickmill data (account 590b1207). D1 cache TTL=600s: while warm, a full portfolio backtest finishes in <15s. When cold (container restart or >10min idle) it takes 3-6 min because 5-year D1 history for 7 symbols is fetched SEQUENTIALLY on purpose (to avoid MetaApi connection resets). If pytest fails with 'job did not finish in time', run it once to warm cache and then rerun — do NOT edit the test file between runs because that triggers backend hot-reload and clears _d1_cache. Current result on real data: €10k -> €11.990,71 (+19.9%) over 2025-01-01 -> 2026-09-21, 206 trades, all 7 symbols real, no sim.",
+  "rca of the issue": "N/A — no bugs. Only observation: hot-reload during tests wipes _d1_cache leading to timeouts on the first run after any backend file save."
+}

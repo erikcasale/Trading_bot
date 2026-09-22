@@ -44,6 +44,16 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Backtest di portafoglio multi-strumento (2026-09-22) — iterazione 10 (6/6 backend, frontend 100%)
+Richiesta: "1 gennaio 2025, conto 10k, opera su ciò che vuoi con posizioni multiple, dimmi ad oggi quanti soldi abbiamo".
+- Nuovo account MetaApi configurato: `590b1207-7417-42f2-af73-eacaf7120b41` (TickmillUK-Demo, login 25374738, CONNESSO). Il precedente era andato DISCONNECTED.
+- `POST /api/portfolio/backtest` (job asincrono) + `GET /api/portfolio/backtest/{job_id}`: parte da €10.000 il 2025-01-01, opera fino a oggi su 7 strumenti (EUR/USD, GBP/USD, USD/CHF, USD/CAD, AUD/USD, XAU/USD, US30) con conto CONDIVISO e POSIZIONI MULTIPLE concorrenti (simulazione event-driven, r_multiple = pnl/100), rischio 1.5%/trade, costi inclusi.
+- ANTI look-ahead: la strategia di ogni strumento è scelta SOLO su dati PRIMA del 2025 (grid ridotta 96 combo), poi applicata in avanti.
+- Fetch storico D1 5 anni SEQUENZIALE per i 7 simboli (evita reset di connessione concorrenti); cache `_d1_cache` TTL 600s → a caldo <15s, a freddo 3-6 min.
+- Frontend: pannello `portfolio-panel` con progresso "Scarico dati X/7", risultato `portfolio-result` (saldo finale, rendimento, annualizzato, DD, trade/WR), tabella `portfolio-symbols-table` per strumento, equity curve, warning simboli simulati.
+- RISULTATO VERIFICATO (dati reali, testing agent): €10.000 (2025-01-01) → ~€11.990 (+19,9%, +11,6%/anno) al 2026-09-21, 628 giorni, 206 trade, WR 37,4%, MaxDD 27,38%, tutti e 7 gli strumenti su dati reali. Il numero esatto varia leggermente per run (dipende dalla grid) — comportamento atteso di un backtest, nessuna garanzia futura.
+- Robustezza: riferimento al task async mantenuto (no GC); status endpoint esclude il task (serializzazione).
+
 ## Posizioni aperte reali nel pannello conto (2026-09-22)
 Richiesta: mostrare le posizioni aperte reali del conto MetaApi (simbolo, lotti, P&L) live.
 - `metaapi_service.get_positions()`: legge le posizioni via RPC `get_positions()`, reverse-map simbolo broker→app (es. AUDUSD→AUD/USD), campi {symbol, side, volume, profit, open_price, current_price}. Cache 5s con fallback (60s) su errore transitorio.

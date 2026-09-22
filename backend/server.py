@@ -952,7 +952,7 @@ async def portfolio_backtest(body: PortfolioReq, user: dict = Depends(get_curren
     job_id = str(uuid.uuid4())
     _portfolio_jobs[job_id] = {"status": "running", "result": None, "error": None,
                                "done": 0, "total": len(PORTFOLIO_SYMBOLS)}
-    asyncio.create_task(_run_portfolio(job_id, body))
+    _portfolio_jobs[job_id]["task"] = asyncio.create_task(_run_portfolio(job_id, body))
     if len(_portfolio_jobs) > 20:
         for k in [k for k, v in list(_portfolio_jobs.items())[:-10] if v.get("status") != "running"]:
             _portfolio_jobs.pop(k, None)
@@ -964,7 +964,7 @@ async def portfolio_backtest_status(job_id: str, user: dict = Depends(get_curren
     job = _portfolio_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job non trovato")
-    return job
+    return {k: v for k, v in job.items() if k != "task"}
 
 
 async def _run_portfolio(job_id, body):
