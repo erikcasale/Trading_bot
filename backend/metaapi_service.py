@@ -199,6 +199,43 @@ _refs_lock = asyncio.Lock()
 _real_symbols = set()  # symbols that have ever returned a real broker price
 
 
+_REV_SYMBOL = {v: k for k, v in SYMBOL_MAP.items()}
+_pos_cache = {"ts": 0.0, "data": None}
+
+
+async def get_positions():
+    """Real open positions [{symbol, side, volume, profit, open_price,
+    current_price}] from the broker, or None if unavailable. Cached 5s."""
+    now = time.time()
+    if (now - _pos_cache["ts"]) < 5 and _pos_cache["data"] is not None:
+        return _pos_cache["data"]
+    if not await check_connected():
+        return None
+    try:
+        conn = await _ensure_rpc()
+        rows = await asyncio.wait_for(conn.get_positions(), timeout=8)
+        out = []
+        for p in (rows or []):
+            broker_sym = p.get("symbol", "")
+            typ = str(p.get("type", "")).upper()
+            out.append({
+                "symbol": _REV_SYMBOL.get(broker_sym, broker_sym),
+                "side": "SELL" if "SELL" in typ else "BUY",
+                "volume": p.get("volume"),
+                "profit": round(p.get("profit", 0), 2),
+                "open_price": p.get("openPrice"),
+                "current_price": p.get("currentPrice"),
+            })
+        _pos_cache.update({"ts": now, "data": out})
+        return out
+    except Exception as e:
+        _state["last_error"] = str(e)[:200]
+        _state["connection"] = None
+        if _pos_cache["data"] is not None and (time.time() - _pos_cache["ts"]) < 60:
+            return _pos_cache["data"]
+        return None
+
+
 async def get_account_info():
     """Real MT5 account {balance, equity, currency, margin, free_margin,
     leverage, profit} from the broker, or None if unavailable. Cached 8s."""
@@ -230,6 +267,9 @@ async def get_account_info():
     except Exception as e:
         _state["last_error"] = str(e)[:200]
         _state["connection"] = None
+        # serve last-known account on transient failure (avoid real->demo flicker)
+        if _acct_cache["data"] and (time.time() - _acct_cache["ts"]) < 60:
+            return _acct_cache["data"]
         return None
 
 

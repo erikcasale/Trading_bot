@@ -44,6 +44,14 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Posizioni aperte reali nel pannello conto (2026-09-22)
+Richiesta: mostrare le posizioni aperte reali del conto MetaApi (simbolo, lotti, P&L) live.
+- `metaapi_service.get_positions()`: legge le posizioni via RPC `get_positions()`, reverse-map simbolo broker→app (es. AUDUSD→AUD/USD), campi {symbol, side, volume, profit, open_price, current_price}. Cache 5s con fallback (60s) su errore transitorio.
+- `/api/bot`: include `account.positions` quando il broker è connesso.
+- Robustezza anti-flicker: `get_account_info`/`get_positions` restituiscono l'ultimo valore noto su fallimento transitorio; il frontend mantiene lo stato REALE "sticky" (non torna a DEMO su un poll fallito).
+- Header: sezione "Posizioni aperte (N)" nel pannello dettaglio con badge BUY/SELL, simbolo, lotti e P&L live (verde/rosso). "Nessuna posizione aperta" se vuoto.
+- Verificato: posizione reale AUD/USD BUY 0.01 lot, P&L live ~-€0.58, visibile nel pannello.
+
 ## P&L live, dettaglio conto e orari intraday batch (2026-09-22)
 Tre miglioramenti (verificati curl + screenshot):
 1. **P&L Live Conto**: header mostra il P&L aperto reale accanto all'equity (es. "€9.999,22 -€0,78 REALE"), aggiornato ogni 6s via polling `/api/bot`. Se MetaApi non fornisce `profit`, si calcola come equity−balance.

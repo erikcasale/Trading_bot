@@ -10,13 +10,19 @@ export default function Header({ botStatus, account, onKill }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const detailRef = useRef(null);
 
-  useEffect(() => { setAcct(account); }, [account]);
+  useEffect(() => { setAcct((prev) => (account?.real || !prev?.real ? account : prev)); }, [account]);
 
   useEffect(() => {
     let alive = true;
     const load = () => {
       api.get("/market/watchlist").then((r) => alive && setTicks(r.data)).catch(() => {});
-      api.get("/bot").then((r) => alive && r.data?.account && setAcct(r.data.account)).catch(() => {});
+      api.get("/bot").then((r) => {
+        if (!alive) return;
+        const a = r.data?.account;
+        if (!a) return;
+        // keep real data sticky: don't flip back to demo on a transient failure
+        setAcct((prev) => (a.real || !prev?.real ? a : prev));
+      }).catch(() => {});
     };
     load();
     const t = setInterval(load, 6000);
@@ -113,6 +119,26 @@ export default function Header({ botStatus, account, onKill }) {
                     </div>
                   ))}
                 </div>
+                <div className="overline mt-3 mb-1.5 text-[#0EA5E9]">Posizioni aperte ({(acct?.positions || []).length})</div>
+                {(acct?.positions || []).length === 0 ? (
+                  <div data-testid="account-no-positions" className="text-[11px] text-[#64748B] font-mono">Nessuna posizione aperta</div>
+                ) : (
+                  <div data-testid="account-positions-list" className="space-y-1">
+                    {(acct?.positions || []).map((p, idx) => (
+                      <div key={idx} data-testid={`account-position-${idx}`}
+                           className="flex items-center justify-between font-mono text-[11px] bg-[#0F1420] rounded-md px-2 py-1">
+                        <span className="flex items-center gap-1.5">
+                          <span className={`px-1 py-0.5 rounded text-[9px] font-bold ${p.side === "BUY" ? "bg-[#10B981]/15 text-up" : "bg-[#EF4444]/15 text-down"}`}>{p.side}</span>
+                          <span className="text-[#E2E8F0] font-semibold">{p.symbol}</span>
+                          <span className="text-[#64748B]">{p.volume} lot</span>
+                        </span>
+                        <span className={p.profit >= 0 ? "text-up" : "text-down"}>
+                          {p.profit >= 0 ? "+" : "-"}{fmtMoney(Math.abs(p.profit))}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

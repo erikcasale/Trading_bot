@@ -458,10 +458,11 @@ async def get_bot(user: dict = Depends(get_current_user)):
     acc = await db.accounts.find_one({"user_id": user["id"]}, {"_id": 0})
     real = await metaapi_service.get_account_info()
     if real:
+        positions = await metaapi_service.get_positions()
         acc = {**(acc or {}), "balance": real["balance"], "equity": real["equity"],
                "currency": real["currency"], "profit": real["profit"],
                "leverage": real.get("leverage"), "free_margin": real["free_margin"],
-               "margin": real["margin"], "real": True}
+               "margin": real["margin"], "positions": positions or [], "real": True}
     else:
         acc = {**(acc or {}), "real": False}
     return {"bot": bot, "account": acc}
