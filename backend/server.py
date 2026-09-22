@@ -971,7 +971,12 @@ async def _run_nosl(job_id, body):
             candles, source = await _get_d1_history(sym, want)
             if source == "real":
                 data[sym] = (candles, source)
-        engine = _nosl_v2_compute if body.engine == "meanrev" else _nosl_compute
+        if body.engine == "ml":
+            engine = _nosl_ml_compute
+        elif body.engine == "meanrev":
+            engine = _nosl_v2_compute
+        else:
+            engine = _nosl_compute
         result = await asyncio.to_thread(engine, data, body.start_date,
                                          body.start_balance, body.lot_per_10k,
                                          body.max_concurrent)
@@ -1293,6 +1298,212 @@ def _nosl_v2_compute(data, start_date, start_balance, lot_per_10k, max_concurren
                               "last_price": candles[-1]["c"], "digits": cfg["digits"]})
     return _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_balance,
                         lot_per_10k, max_concurrent, real_syms, sim_syms, "nosl_meanrev")
+
+
+# ---- Learned no-SL engine: gradient-boosting entry gate on mean-reversion ----
+def _std(seq):
+    if len(seq) < 2:
+        return 0.0
+    m = sum(seq) / len(seq)
+    return (sum((x - m) ** 2 for x in seq) / len(seq)) ** 0.5
+
+
+def _candidate_side(closes, i):
+    r = _rsi(closes[:i + 1], 2)
+    if r < 30:
+        return "BUY"
+    if r > 70:
+        return "SELL"
+    return None
+
+
+def _ml_features(candles, closes, i, side):
+    price = closes[i]
+    sma20, sma50, sma200 = _mean(closes[i - 19:i + 1]), _mean(closes[i - 49:i + 1]), _mean(closes[i - 199:i + 1])
+    sd20 = _std(closes[i - 19:i + 1]) or 1e-9
+    sd50 = _std(closes[i - 49:i + 1]) or 1e-9
+    atr = _atr_at(candles, i, 14) or 1e-9
+    atr50 = (sum(candles[k]["h"] - candles[k]["l"] for k in range(max(0, i - 49), i + 1)) / min(50, i + 1)) or 1e-9
+    hi20 = max(c["h"] for c in candles[i - 19:i + 1])
+    lo20 = min(c["l"] for c in candles[i - 19:i + 1])
+    rng = (hi20 - lo20) or 1e-9
+    streak = 0
+    for k in range(i, max(0, i - 10), -1):
+        if closes[k] > closes[k - 1]:
+            streak = streak + 1 if streak >= 0 else 0
+            if streak == 0:
+                break
+        elif closes[k] < closes[k - 1]:
+            streak = streak - 1 if streak <= 0 else 0
+            if streak == 0:
+                break
+        else:
+            break
+    dow = _pt(candles[i]["time"]).weekday()
+
+    def lr(k):
+        return math.log(closes[i] / closes[i - k]) if i - k >= 0 and closes[i - k] > 0 else 0.0
+
+    return [
+        _rsi(closes[:i + 1], 2), _rsi(closes[:i + 1], 14),
+        (price - sma20) / sd20, (price - sma50) / sd50,
+        lr(1), lr(3), lr(5), lr(10),
+        atr / price, atr / atr50,
+        1.0 if sma20 > sma50 else 0.0, 1.0 if sma50 > sma200 else 0.0, 1.0 if price > sma200 else 0.0,
+        (price - lo20) / rng, float(streak), float(dow),
+        1.0 if side == "BUY" else -1.0,
+    ]
+
+
+def _ml_dataset(candles, closes, cfg, tp_mult, tstop):
+    """Every mean-reversion candidate → (features, win?, pnl, entry_time)."""
+    X, y, pnl, times = [], [], [], []
+    n = len(candles)
+    for i in range(200, n - 1):
+        side = _candidate_side(closes, i)
+        if not side:
+            continue
+        entry = closes[i]
+        direction = 1 if side == "BUY" else -1
+        atr = _atr_at(candles, i, 14) or cfg["vol"]
+        tp = entry + direction * atr * tp_mult
+        end_j = min(i + tstop, n - 1)
+        exit_price, hit = None, False
+        for j in range(i + 1, end_j + 1):
+            cj = candles[j]
+            if (side == "BUY" and cj["h"] >= tp) or (side == "SELL" and cj["l"] <= tp):
+                exit_price, hit = tp, True
+                break
+        if not hit:
+            exit_price = closes[end_j]
+        p = (exit_price - entry) * direction
+        X.append(_ml_features(candles, closes, i, side))
+        y.append(1 if p > 0 else 0)
+        pnl.append(p)
+        times.append(_pt(candles[i]["time"]))
+    return X, y, pnl, times
+
+
+def _ml_symbol(candles, cfg, start):
+    """Train a gradient-boosting gate on pre-start candidates (validate on the last
+    training year to pick tp_mult + probability threshold), then trade the unseen
+    period taking ONLY high-probability candidates. NO stop loss; time-stop exit."""
+    from sklearn.ensemble import GradientBoostingClassifier
+    d = cfg["digits"]
+    closes = [c["c"] for c in candles]
+    tstop = 20
+    val_start = start - timedelta(days=365)
+    best = None  # (val_net, tp_mult, thr, model_refit_on_all_pre_start)
+    for tp_mult in (1.0, 1.5, 2.0):
+        X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop)
+        idx_core = [k for k, t in enumerate(times) if t < val_start]
+        idx_val = [k for k, t in enumerate(times) if val_start <= t < start]
+        if len(idx_core) < 60 or len(idx_val) < 15:
+            continue
+        yc = [y[k] for k in idx_core]
+        if len(set(yc)) < 2:
+            continue
+        Xc = [X[k] for k in idx_core]
+        model = GradientBoostingClassifier(n_estimators=150, max_depth=3,
+                                           learning_rate=0.05, subsample=0.8, random_state=42)
+        model.fit(Xc, yc)
+        proba_val = model.predict_proba([X[k] for k in idx_val])[:, 1]
+        for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
+            net = sum(pnl[idx_val[m]] for m in range(len(idx_val)) if proba_val[m] >= thr)
+            taken = sum(1 for pv in proba_val if pv >= thr)
+            if taken < 5:
+                continue
+            if best is None or net > best[0]:
+                best = (net, tp_mult, thr)
+    if best is None or best[0] <= 0:
+        return None  # no learned edge → don't trade this symbol
+    _, tp_mult, thr = best
+    # refit on ALL pre-start candidates (still no look-ahead into the test period)
+    X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop)
+    idx_tr = [k for k, t in enumerate(times) if t < start]
+    ytr = [y[k] for k in idx_tr]
+    if len(set(ytr)) < 2:
+        return None
+    model = GradientBoostingClassifier(n_estimators=150, max_depth=3,
+                                       learning_rate=0.05, subsample=0.8, random_state=42)
+    model.fit([X[k] for k in idx_tr], ytr)
+
+    trades, open_t, n = [], None, len(candles)
+    for i in range(200, n):
+        c = candles[i]
+        if open_t is not None:
+            side, tp = open_t["side"], open_t["tp"]
+            hit = (side == "BUY" and c["h"] >= tp) or (side == "SELL" and c["l"] <= tp)
+            timed = (i - open_t["entry_index"]) >= tstop
+            if hit or timed:
+                open_t.update(exit_index=i, exit=round(tp if hit else c["c"], d),
+                              exit_time=_bar_close(candles, i), open=False,
+                              timed=bool(timed and not hit))
+                trades.append(open_t)
+                open_t = None
+        if open_t is None and i < n - 1:
+            if _pt(_bar_close(candles, i)) < start:
+                continue
+            side = _candidate_side(closes, i)
+            if not side:
+                continue
+            proba = model.predict_proba([_ml_features(candles, closes, i, side)])[0][1]
+            if proba < thr:
+                continue
+            entry = closes[i]
+            atr = _atr_at(candles, i, 14) or cfg["vol"]
+            tp = entry + (1 if side == "BUY" else -1) * atr * tp_mult
+            open_t = {"entry_index": i, "entry_time": _bar_close(candles, i), "side": side,
+                      "entry": round(entry, d), "tp": round(tp, d), "open": True, "proba": round(float(proba), 3)}
+    if open_t is not None:
+        open_t.update(exit_index=n - 1, exit=round(candles[-1]["c"], d),
+                      exit_time=_bar_close(candles, n - 1), open=True, timed=False)
+        trades.append(open_t)
+    info = {"tp_atr": tp_mult, "time_stop": tstop, "threshold": round(thr, 2),
+            "train_candidates": len(idx_tr), "val_net": round(best[0], 5)}
+    return trades, info
+
+
+def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=10):
+    try:
+        start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
+    except Exception:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    positions, real_syms, sim_syms = [], [], []
+    price_on, all_dates, sym_strategy = {}, set(), {}
+    for sym, (candles, source) in data.items():
+        if not candles or len(candles) < 300:
+            continue
+        (real_syms if source == "real" else sim_syms).append(sym)
+        cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
+        contract = CONTRACT_SIZE.get(sym, 100000)
+        try:
+            picked = _ml_symbol(candles, cfg, start)
+        except Exception:
+            logger.exception("ml symbol %s failed", sym)
+            picked = None
+        if picked is None:
+            continue
+        trades, info = picked
+        sym_strategy[sym] = {"label": "ML gate (gradient boosting)", "entry": "ml_meanrev", **info}
+        price_on[sym] = {}
+        for c in candles:
+            dd = _pt(c["time"]).date()
+            price_on[sym][dd] = c["c"]
+            if _pt(c["time"]) >= start:
+                all_dates.add(dd)
+        for t in trades:
+            et = _pt(t["entry_time"])
+            if et < start:
+                continue
+            positions.append({"sym": sym, "side": t["side"], "dir": 1 if t["side"] == "BUY" else -1,
+                              "entry": t["entry"], "tp": t["tp"], "entry_t": et,
+                              "exit_t": _pt(t["exit_time"]), "exit": t["exit"],
+                              "contract": contract, "open": t["open"], "timed": t.get("timed", False),
+                              "last_price": candles[-1]["c"], "digits": cfg["digits"]})
+    return _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_balance,
+                        lot_per_10k, max_concurrent, real_syms, sim_syms, "nosl_ml")
+
 
 
 class PortfolioReq(BaseModel):

@@ -84,7 +84,7 @@ export default function ForwardTest({ symbol }) {
     if (noslPoll.current) clearInterval(noslPoll.current);
     setNosl(null); setNoslState({ loading: true, done: 0, total: 5 });
     try {
-      const { data } = await api.post("/portfolio/nosl", { start_date: "2026-01-01", start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10, engine: "meanrev" });
+      const { data } = await api.post("/portfolio/nosl", { start_date: "2026-01-01", start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10, engine: "ml" });
       const jobId = data.job_id;
       let ticks = 0;
       noslPoll.current = setInterval(async () => {
@@ -389,7 +389,7 @@ export default function ForwardTest({ symbol }) {
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-[#EF4444]" />
             <span className="font-head font-bold text-sm">Test SENZA Stop Loss</span>
-            <span className="overline">2026 · mean-reversion + time-stop · solo forex · max 10 aperte · size composta 0,1/€10k</span>
+            <span className="overline">2026 · modello ML (gradient boosting) + time-stop · solo forex · size composta 0,1/€10k</span>
           </div>
           <button data-testid="nosl-run-button" onClick={runNosl} disabled={noslState.loading}
             className="inline-flex items-center gap-1.5 bg-[#EF4444] hover:bg-[#DC2626] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
@@ -398,7 +398,7 @@ export default function ForwardTest({ symbol }) {
           </button>
         </div>
         <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
-          <b className="text-white">Nessuno stop loss di prezzo.</b> Per evitare i perdenti incagliati, il motore usa <b className="text-white">mean-reversion</b> (compra gli eccessi ribassisti / vende quelli rialzisti, RSI) con un <b className="text-white">time-stop</b>: se il trade non raggiunge il take-profit entro N giorni viene chiuso comunque. Solo forex, size composta 0,1 lotti ogni €10k. Mostriamo l'<b className="text-white">equity reale mark-to-market</b>: è così che si vede il rischio vero.
+          <b className="text-white">Nessuno stop loss di prezzo.</b> Un modello <b className="text-white">gradient boosting</b> viene addestrato sui ~4 anni precedenti (centinaia di setup per simbolo, decine di caratteristiche di mercato) a riconoscere quali ingressi hanno più probabilità di chiudere in profitto; la soglia è validata sull'ultimo anno di training. Sul 2026 (mai visto) prende <b className="text-white">solo</b> i setup ad alta probabilità. Uscita: take-profit ad ATR o <b className="text-white">time-stop</b> (chiude dopo N giorni). Solo forex, size composta 0,1/€10k. Mostriamo l'<b className="text-white">equity reale mark-to-market</b>.
         </p>
 
         {nosl && (
