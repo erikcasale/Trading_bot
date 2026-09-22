@@ -1094,6 +1094,9 @@ def _discover_compute(candles, cfg, target_annual, max_dd):
         vtext = "Nessuna configurazione è risultata profittevole nell'ultimo anno su questo strumento: questa è la migliore trovata, ma NON va tradata così — cambia strumento o timeframe."
 
     full = run_forward_test(candles, cfg, rec_risk, params=params)
+    # exact real-data replay of the validated last-12-months window, sized at the
+    # recommended risk — so the applied replay prices match what was validated
+    replay = run_forward_test(val, cfg, rec_risk, params=params)
     entry_label = {"smc": "Smart Money", "meanrev": "Mean-Reversion",
                    "breakout": "Breakout", "trend": "Trend-Following (MA cross)"}[params["entry"]]
     return {
@@ -1114,6 +1117,17 @@ def _discover_compute(candles, cfg, target_annual, max_dd):
             "profit_factor": vr["profit_factor"], "trades": vr["total_trades"],
             "annual_return": round(va_1pct, 1), "net": vr["realized_net"],
             "max_drawdown": vr["max_drawdown"], "equity_curve": vr["equity_curve"],
+            "period_start": val[0]["time"], "period_end": val[-1]["time"],
+        },
+        "replay": {
+            "digits": cfg["digits"], "warmup": 45,
+            "candles": val, "trades": replay["trades"],
+            "equity_curve": replay["equity_curve"],
+            "start_equity": replay["start_equity"], "final_equity": replay["true_equity"],
+            "total_trades": replay["total_trades"], "winrate": replay["winrate"],
+            "profit_factor": replay["profit_factor"], "max_drawdown": replay["max_drawdown"],
+            "avg_win": replay["avg_win"], "avg_loss": replay["avg_loss"],
+            "net_profit": replay["realized_net"],
             "period_start": val[0]["time"], "period_end": val[-1]["time"],
         },
         "full_equity_curve": full["equity_curve"],
@@ -1158,7 +1172,7 @@ async def startup():
     logger.info("Apex Flow ready.")
     try:
         import asyncio
-        asyncio.create_task(metaapi_service.check_connected(force=True))
+        asyncio.create_task(metaapi_service.warm_up())
     except Exception:
         pass
 

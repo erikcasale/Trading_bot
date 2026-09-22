@@ -71,16 +71,20 @@ export default function ForwardTest({ symbol }) {
   };
 
   const applyDiscovered = async () => {
-    if (!disc) return;
-    setLoading(true); setPlaying(false); setPeriod("Anno");
-    try {
-      const { data } = await api.post("/forwardtest/run", {
-        symbol, timeframe: "D1", bars: 365, params: disc.best_params,
-        risk_percent: disc.recommended_risk_percent });
-      setRes(data); setIdx(data.warmup || 45); setPlaying(true);
-      toast.success("Strategia appresa applicata all'ultimo anno");
-    } catch { toast.error("Errore"); }
-    finally { setLoading(false); }
+    if (!disc || !disc.replay) return;
+    setPlaying(false); setPeriod("Anno");
+    // replay the EXACT real-data last-12-months window used in validation
+    const r = disc.replay;
+    setRes({
+      symbol, timeframe: "D1", source: disc.source, mode: "optimized",
+      digits: r.digits, warmup: r.warmup, candles: r.candles, trades: r.trades,
+      equity_curve: r.equity_curve, start_equity: r.start_equity,
+      total_trades: r.total_trades, winrate: r.winrate, profit_factor: r.profit_factor,
+      max_drawdown: r.max_drawdown, avg_win: r.avg_win, avg_loss: r.avg_loss,
+      net_profit: r.net_profit, period_start: r.period_start, period_end: r.period_end,
+    });
+    setIdx(r.warmup || 45); setPlaying(true);
+    toast.success(`Replay ultimo anno · dati ${disc.source === "real" ? "REALI Tickmill" : "SIMULATI"}`);
   };
 
   const run = async () => {
@@ -256,6 +260,12 @@ export default function ForwardTest({ symbol }) {
 
         {disc && (
           <div data-testid="discover-result" className="mt-3 space-y-2 fade-up">
+            {disc.source !== "real" && (
+              <div data-testid="discover-simulated-warning" className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/10 border border-[#F59E0B]/40 rounded-lg p-2.5 leading-relaxed">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span><b>Attenzione: dati SIMULATI.</b> Il broker Tickmill non era raggiungibile durante l'analisi, quindi i prezzi qui sotto NON sono reali e non combaciano con MT5. Riprova tra poco: appena la connessione è pronta i dati diventano reali.</span>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <span data-testid="discover-verdict-badge"
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border ${

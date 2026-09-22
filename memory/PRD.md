@@ -44,6 +44,15 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Fix prezzi simulati (2026-09-22)
+Problema riportato: i prezzi dei trade non combaciavano con i dati reali.
+Causa: **fallback silenzioso a dati simulati** su connessione MetaApi "a freddo" (dopo un restart del backend il primo fetch andava in timeout → `generate_candles` con base fissa 1.0850 e timestamp `now()`, prezzi finti).
+Fix:
+- `metaapi_service.warm_up()` chiamata all'avvio (`startup`) stabilisce subito la connessione RPC → il primo fetch è già reale (verificato: forward-test D1 subito dopo restart = `source: real`).
+- La scoperta ora include `replay`: il replay ESATTO degli ultimi 12 mesi su dati reali (candele+trade+equity) dimensionato al rischio consigliato. Il pulsante "Applica e riproduci l'ultimo anno" usa questi dati embedded → i prezzi combaciano al 100% con la finestra validata (niente seconda fetch con finestra diversa).
+- Avviso rosso `discover-simulated-warning` in UI quando `source != 'real'`.
+Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezzanotte GMT+2/+3): confrontare in MT5 con lo stesso fuso.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).

@@ -192,6 +192,21 @@ async def fetch_candles(symbol: str, timeframe: str, n: int):
     return None
 
 
+async def warm_up():
+    """Establish the RPC connection ahead of the first user request so cold
+    starts don't silently fall back to simulated data."""
+    try:
+        if not await check_connected(force=True):
+            return False
+        await _ensure_rpc()
+        return True
+    except Exception as e:
+        _state["last_error"] = str(e)[:220]
+        logger.warning(f"MetaApi warm_up failed: {e}")
+        _state["connection"] = None
+        return False
+
+
 async def place_market_order(symbol: str, side: str, volume: float, sl=None, tp=None):
     """Execute a real market order on the connected demo account."""
     if not await check_connected():
