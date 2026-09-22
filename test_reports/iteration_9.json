@@ -1,0 +1,25 @@
+{
+  "summary": "Iteration 9 validated the new async strategy-discovery engine (5-year D1 train/last-year-test walk-forward) end-to-end. Backend pytest: 8/8 passed in /app/backend/tests/test_discover.py (137s wall). Frontend playwright: full demo login → discover-panel → discover-run-button → 'Apprendimento in corso…' label → polling → discover-result with PROFITTEVOLE (ultimo anno) verdict badge, discover-seg-0 (2021-07-26 → 2025-09-18, WR40.9% PF1.36 Ann3.4% Net €1412 66trades) and discover-seg-1 (2025-09-21 → 2026-09-21, WR42.9% PF1.46 Ann3.7% Net €374.8 14trades) → discover-apply-button → forward-test-panel replay. Zero console errors. Verdict consistency rule (profittevole ⇒ last_year.net>0 & PF≥1.1) held on EUR/USD, XAU/USD, US30. D1 cache proven: first EUR/USD call 4.6s, second 3.3s (cached path). Source='real' (MetaApi), period spans ~5y (2021-07 → 2026-09). Paginated D1 fetch returned enough candles (train equity_curve ≥500 pts, val 150-400 pts). 404 responses correct on unknown job_id and unknown symbol. New 'trend' entry + 'rsi' filter run through /api/forwardtest/run with mode='optimized' and produces trades+metrics. combos_tested=192 (matches DISCOVER_GRID).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_discover.py",
+    "/app/test_reports/pytest/iter9_discover.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py now 1178 lines (recurring). Discover job store `_discover_jobs` and D1 cache `_d1_cache` are pure in-memory dicts with no size cap / no TTL eviction for jobs — a long-running instance will leak memory. Add a max size + LRU eviction, or drop finished jobs after ~30 min.",
+    "server.py:987 cache TTL condition `len(hit[1]) >= want * 0.9` means a discover with years=5 (want≈1340) will re-fetch if the cached array is <1206 candles — but paginated fetch may return exactly 1300ish. Fine today, but if MetaApi returns fewer candles on some pages the cache would silently churn. Consider caching by (symbol, want_bucket) or always keep the largest fetched window.",
+    "server.py CORS: `allow_credentials=False` with `allow_origins=['*']` is fine for a demo but incompatible with future httpOnly-cookie auth flows — noted for later.",
+    "server.py: _run_discover uses `asyncio.create_task` without keeping a reference — Python GC can cancel it. Store the task on the job dict to prevent 'Task was destroyed while pending' warnings under load.",
+    "DISCOVER_GRID hard-coded to 192 combos; consider externalizing so future users can trade compute-vs-search-space without editing code."
+  ],
+  "updated_files": ["/app/backend/tests/test_discover.py (new)"],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% of tested flows"},
+  "test_credentials": "demo@apexflow.io / apexflow2026 (from /app/memory/test_credentials.md context)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Discover async job engine works end-to-end with real MetaApi D1 data (source='real'). Cached path <5s, cold path can be up to ~35s. Verdict is 'profittevole' on EUR/USD with the current data (last_year Net €374 PF1.46 on 14 trades). Expect verdicts to differ per symbol / market regime — this is expected honesty. Test file /app/backend/tests/test_discover.py should be reused as regression suite. Run serially with -n 0 (see pytest.ini fixed xdist config).",
+  "rca of the issue": "N/A — no bugs found. Feature works as designed."
+}

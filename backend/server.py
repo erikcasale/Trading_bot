@@ -968,7 +968,12 @@ async def strategy_discover(body: DiscoverReq, user: dict = Depends(get_current_
     job_id = str(uuid.uuid4())
     _discover_jobs[job_id] = {"status": "running", "result": None, "error": None,
                               "started": datetime.now(timezone.utc).isoformat()}
-    asyncio.create_task(_run_discover(job_id, body))
+    # keep a reference so the task isn't garbage-collected mid-flight
+    _discover_jobs[job_id]["task"] = asyncio.create_task(_run_discover(job_id, body))
+    # trim old finished jobs (demo, single-process, keep it small)
+    if len(_discover_jobs) > 40:
+        for k in [k for k, v in list(_discover_jobs.items())[:-20] if v.get("status") != "running"]:
+            _discover_jobs.pop(k, None)
     return {"job_id": job_id, "status": "running"}
 
 
@@ -977,7 +982,7 @@ async def strategy_discover_status(job_id: str, user: dict = Depends(get_current
     job = _discover_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job non trovato")
-    return job
+    return {k: v for k, v in job.items() if k != "task"}
 
 
 async def _get_d1_history(symbol: str, want: int):
