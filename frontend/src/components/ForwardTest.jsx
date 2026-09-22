@@ -427,6 +427,48 @@ export default function ForwardTest({ symbol }) {
                 <Line type="monotone" dataKey="e" stroke={nosl.net_true >= 0 ? "#10B981" : "#EF4444"} strokeWidth={1.6} dot={false} isAnimationActive={false} />
               </LineChart>
             </ResponsiveContainer>
+            {nosl.open_positions?.length > 0 && (
+              <div data-testid="nosl-open-positions" className="mt-1 rounded-lg border border-[#EF4444]/30 overflow-hidden">
+                <div className="px-2.5 py-1.5 bg-[#EF4444]/10 text-[11px] font-bold text-[#EF4444]">
+                  Posizioni aperte senza SL ({nosl.open_positions.length}) — perché sono ancora aperte
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="text-[#64748B] text-left">
+                        <th className="px-2 py-1 font-medium">Strumento</th>
+                        <th className="px-2 py-1 font-medium">Dir.</th>
+                        <th className="px-2 py-1 font-medium">Strategia</th>
+                        <th className="px-2 py-1 font-medium">Aperta</th>
+                        <th className="px-2 py-1 font-medium text-right">Entry</th>
+                        <th className="px-2 py-1 font-medium text-right">TP</th>
+                        <th className="px-2 py-1 font-medium text-right">Ora</th>
+                        <th className="px-2 py-1 font-medium text-right">Floating</th>
+                        <th className="px-2 py-1 font-medium text-right">Contro TP</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {nosl.open_positions.map((p, i) => (
+                        <tr key={i} className="border-t border-white/5">
+                          <td className="px-2 py-1 font-semibold text-white">{p.symbol}</td>
+                          <td className={`px-2 py-1 font-bold ${p.side === "BUY" ? "text-[#10B981]" : "text-[#EF4444]"}`}>{p.side}</td>
+                          <td className="px-2 py-1 text-[#94A3B8]">{p.strategy}</td>
+                          <td className="px-2 py-1 text-[#94A3B8]">{p.entry_date}</td>
+                          <td className="px-2 py-1 text-right text-[#CBD5E1]">{p.entry}</td>
+                          <td className="px-2 py-1 text-right text-[#0EA5E9]">{p.tp}</td>
+                          <td className="px-2 py-1 text-right text-[#CBD5E1]">{p.current}</td>
+                          <td className={`px-2 py-1 text-right font-bold ${p.floating >= 0 ? "text-[#10B981]" : "text-[#EF4444]"}`}>{p.floating >= 0 ? "+" : ""}€{p.floating.toLocaleString("it-IT")}</td>
+                          <td className={`px-2 py-1 text-right ${p.adverse_move_pct > 0 ? "text-[#EF4444]" : "text-[#10B981]"}`}>{p.adverse_move_pct > 0 ? "-" : "+"}{Math.abs(p.adverse_move_pct)}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="px-2.5 py-1.5 text-[10px] text-[#94A3B8] leading-relaxed border-t border-white/5">
+                  Ogni posizione è stata aperta da un segnale valido della strategia addestrata sugli anni precedenti (trend/breakout/order block). Senza stop loss, quando il prezzo va nella direzione opposta il trade <b className="text-[#EF4444]">non viene mai chiuso</b>: resta aperto ad accumulare perdita in attesa di un TP che si allontana. "Contro TP" = quanto il prezzo si è mosso contro, in % della distanza prevista fino al TP.
+                </p>
+              </div>
+            )}
             <p className="text-[10px] text-[#EF4444] leading-relaxed">
               ⚠️ I "trade chiusi" possono sembrare quasi tutti vincenti (chiudono solo al TP), ma le perdite restano aperte e affondano l'equity reale. Un alto tasso di vincite qui è ingannevole: conta l'equity mark-to-market. Approccio ad altissimo rischio, a scopo dimostrativo.
             </p>

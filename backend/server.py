@@ -992,7 +992,7 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
         return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
 
     positions, real_syms, sim_syms = [], [], []
-    price_on, all_dates = {}, set()
+    price_on, all_dates, sym_strategy = {}, set(), {}
     for sym, (candles, source) in data.items():
         if not candles or len(candles) < 200:
             continue
@@ -1005,6 +1005,11 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
         params = _pick_params(train, cfg)
         if params is None:
             continue
+        sym_strategy[sym] = {
+            "label": ENTRY_LABELS.get(params["entry"], params["entry"]),
+            "entry": params["entry"], "tp_mult": params["tp_mult"],
+            "trend_filter": params.get("trend_filter", False), "rsi": params.get("rsi", False),
+        }
         price_on[sym] = {}
         for c in candles:
             d = pt(c["time"]).date()
@@ -1032,7 +1037,8 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
                     break
             positions.append({"sym": sym, "side": side, "dir": direction, "entry": entry,
                               "tp": tp, "entry_t": et, "exit_t": exit_t, "exit": exit_price,
-                              "contract": contract, "open": is_open})
+                              "contract": contract, "open": is_open,
+                              "last_price": last_c["c"], "digits": cfg.get("digits", 5)})
     if not positions:
         return None
 
@@ -1094,6 +1100,29 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
                            for p in open_p if p.get("lot")), 2)
     per_symbol = sorted([{"symbol": s, "net": n} for s, n in sym_net.items()], key=lambda x: -x["net"])
     end = max((p["exit_t"] for p in positions), default=start)
+
+    def _last_px(p):
+        return price_on[p["sym"]][max(price_on[p["sym"]])]
+
+    open_detail = []
+    for p in open_p:
+        if not p.get("lot"):
+            continue
+        cur = _last_px(p)
+        flo = round((cur - p["entry"]) * p["dir"] * p["lot"] * p["contract"], 2)
+        strat = sym_strategy.get(p["sym"], {})
+        dg = p.get("digits", 5)
+        # % of the intended distance to TP still missing (how far offside the trade is)
+        tp_dist = abs(p["tp"] - p["entry"]) or 1e-9
+        adverse = (p["entry"] - cur) * p["dir"]  # >0 means price moved against us
+        open_detail.append({
+            "symbol": p["sym"], "side": p["side"], "strategy": strat.get("label", ""),
+            "entry_rule": strat.get("entry", ""), "entry_date": p["entry_t"].date().isoformat(),
+            "entry": round(p["entry"], dg), "tp": round(p["tp"], dg),
+            "current": round(cur, dg), "lot": p["lot"], "floating": flo,
+            "adverse_move_pct": round(adverse / tp_dist * 100, 1),
+        })
+    open_detail.sort(key=lambda x: x["floating"])
     return {
         "mode": "nosl_compound", "start_date": start.date().isoformat(),
         "end_date": end.date().isoformat(), "start_balance": round(start_balance, 2),
@@ -1106,6 +1135,7 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=1
         "closed_trades": len(closed), "tp_wins": len(closed),
         "open_trades": len(open_p), "open_floating": open_float,
         "per_symbol": per_symbol, "real_symbols": real_syms, "sim_symbols": sim_syms,
+        "sym_strategy": sym_strategy, "open_positions": open_detail,
         "equity_curve": curve,
     }
 
