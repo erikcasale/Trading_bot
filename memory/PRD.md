@@ -44,6 +44,13 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Miglioramenti verifica trade (2026-09-22)
+Quattro migliorie richieste dall'utente, implementate e verificate (curl + screenshot):
+1. **Precisione Intraday**: endpoint `POST /api/forwardtest/intraday` scarica le candele H1 nel/i giorno/i del trade e trova l'ORA ESATTA del primo tocco SL/TP (es. SL toccato alle 15:00 del 16/07). `metaapi_service.fetch_candles_before()` per il fetch su intervallo. Frontend: pulsante orologio "intraday" per riga che mostra "·HH:MM TP/SL" (o "SL/TP?" se ambiguo nella stessa candela).
+2. **Nessun Prezzo Finto**: durante il warm-up della connessione (broker configurato ma prezzi non ancora pronti) watchlist e ticker mostrano "connessione…" invece di valori simulati. `metaapi_service` traccia `_real_symbols`; symbol source ∈ {real, simulated, warming}. Simboli mai reali (BTC/ETH su Tickmill demo) mostrano badge "SIM".
+3. **Link MT5**: pulsante copia per riga → copia "SYMBOL YYYY-MM-DD" negli appunti per incollarlo in MT5.
+4. **Colonna Durata**: `duration_days` per trade (giorni tra entrata e uscita), nuova colonna "Durata" (es. 6g, 14g).
+
 ## Correzione orari trade su D1 (2026-09-22)
 Problema riportato: "gli orari dei trade non tornano, a quell'ora il prezzo non era a quel valore".
 Causa: su timeframe giornaliero (D1) mostravamo `entry_time`/`exit_time` = timestamp di APERTURA della candela (ora broker es. 21:00/22:00 UTC), ma:

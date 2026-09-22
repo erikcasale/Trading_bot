@@ -195,6 +195,15 @@ async def fetch_candles(symbol: str, timeframe: str, n: int):
 _price_cache = {"ts": 0.0, "data": {}}
 _dref_cache = {"ts": 0.0, "data": {}}
 _refs_lock = asyncio.Lock()
+_real_symbols = set()  # symbols that have ever returned a real broker price
+
+
+def is_configured():
+    return bool(os.environ.get("METAAPI_TOKEN") and os.environ.get("METAAPI_ACCOUNT_ID"))
+
+
+def known_real(app_sym):
+    return app_sym in _real_symbols
 
 
 async def get_prices(symbols):
@@ -220,6 +229,7 @@ async def get_prices(symbols):
                 return
             out[app_sym] = {"bid": bid, "ask": ask,
                             "price": round((bid + ask) / 2, 5) if ask else bid}
+            _real_symbols.add(app_sym)
         except Exception as e:
             _state["last_error"] = str(e)[:180]
 
@@ -227,6 +237,28 @@ async def get_prices(symbols):
     if out:
         _price_cache.update({"ts": now, "data": out})
     return out
+
+
+async def fetch_candles_before(symbol: str, timeframe: str, end_time, n: int):
+    """Fetch up to `n` candles ending at/around `end_time` (a datetime), for
+    drilling into the exact intraday moment SL/TP was touched."""
+    if not await check_connected():
+        return None
+    sym = SYMBOL_MAP.get(symbol, symbol.replace("/", ""))
+    tf = TF_MAP.get(timeframe, "1h")
+    try:
+        rows = await _fetch_page(sym, tf, end_time, min(max(n, 24), 1000))
+        if not rows:
+            return None
+        page = _norm(rows)
+        page.sort(key=lambda x: x["time"])
+        for c in page:
+            c.pop("_t", None)
+        return page
+    except Exception as e:
+        _state["last_error"] = str(e)[:220]
+        _state["connection"] = None
+        return None
 
 
 async def get_daily_refs(symbols):

@@ -326,6 +326,8 @@ async def watchlist(user: dict = Depends(get_current_user)):
     refs = metaapi_service.cached_daily_refs() if prices else {}
     if prices and not refs:
         asyncio.create_task(metaapi_service.get_daily_refs(syms))  # populate for next poll
+    # broker configured but no live prices yet => connection is warming up
+    warming = metaapi_service.is_configured() and not prices
     out = []
     for sym, cfg in INSTRUMENTS.items():
         real = prices.get(sym)
@@ -334,6 +336,11 @@ async def watchlist(user: dict = Depends(get_current_user)):
             ref = refs.get(sym)
             change = (last - ref) / ref * 100 if ref else 0
             source = "real"
+        elif warming or (metaapi_service.is_configured() and metaapi_service.known_real(sym)):
+            # don't show fake prices during the warm-up window
+            out.append({"symbol": sym, "category": cfg["cat"], "price": None,
+                        "change": 0, "digits": cfg["digits"], "source": "warming"})
+            continue
         else:
             candles, _ = generate_candles(sym, "M15", 40)
             last = candles[-1]["c"]
@@ -756,6 +763,14 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced",
     open_trades = sum(1 for t in trades if t["result"] == "open")
     for t in trades:
         t.pop("unit", None)
+        et, xt = t.get("entry_time"), t.get("exit_time")
+        try:
+            end_iso = xt if xt else candles[-1].get("time")
+            dd = (datetime.fromisoformat(str(end_iso).replace("Z", "+00:00"))
+                  - datetime.fromisoformat(str(et).replace("Z", "+00:00"))).days
+            t["duration_days"] = max(0, dd)
+        except Exception:
+            t["duration_days"] = None
     return {
         "start_equity": start_equity, "final_equity": true_equity,
         "trades": trades, "equity_curve": equity_curve,
@@ -803,6 +818,50 @@ async def forwardtest_run(body: ForwardTestReq, user: dict = Depends(get_current
             "mode": "optimized" if body.params else mode, "digits": cfg["digits"],
             "candles": candles, "warmup": 45,
             "period_start": candles[0]["time"], "period_end": candles[-1]["time"], **res}
+
+
+class IntradayReq(BaseModel):
+    symbol: str
+    side: str
+    sl: float
+    tp: float
+    entry_time: str
+    exit_time: Optional[str] = None
+
+
+@api_router.post("/forwardtest/intraday")
+async def forwardtest_intraday(body: IntradayReq, user: dict = Depends(get_current_user)):
+    """Find the exact hour SL/TP was first touched by scanning H1 candles
+    within the trade's day(s). Used to pin down the intraday moment on D1."""
+    if body.symbol not in INSTRUMENTS:
+        raise HTTPException(status_code=404, detail="Strumento non trovato")
+    try:
+        start = datetime.fromisoformat(body.entry_time.replace("Z", "+00:00"))
+        end = (datetime.fromisoformat(body.exit_time.replace("Z", "+00:00"))
+               if body.exit_time else start + timedelta(days=3))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Date non valide")
+    hours = int((end - start).total_seconds() // 3600) + 60
+    rows = await metaapi_service.fetch_candles_before(
+        body.symbol, "H1", end + timedelta(hours=6), max(48, min(hours, 1000)))
+    if not rows:
+        return {"available": False}
+    side = body.side.upper()
+    for c in rows:
+        try:
+            t = datetime.fromisoformat(str(c["time"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if t < start or t > end + timedelta(hours=4):
+            continue
+        hi, lo = c["h"], c["l"]
+        tp_hit = hi >= body.tp if side == "BUY" else lo <= body.tp
+        sl_hit = lo <= body.sl if side == "BUY" else hi >= body.sl
+        if tp_hit or sl_hit:
+            level = "AMBIGUO" if (tp_hit and sl_hit) else ("TP" if tp_hit else "SL")
+            return {"available": True, "found": True, "time": c["time"],
+                    "level": level, "ambiguous": tp_hit and sl_hit}
+    return {"available": True, "found": False}
 
 
 class OptimizeReq(BaseModel):

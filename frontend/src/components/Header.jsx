@@ -39,10 +39,18 @@ export default function Header({ botStatus, account, onKill }) {
             {marquee.map((t, i) => (
               <span key={i} className="inline-flex items-center gap-2 px-4 border-r border-[#1E293B] whitespace-nowrap">
                 <span className="text-xs font-semibold text-[#94A3B8]">{t.symbol}</span>
-                <span className="font-mono text-xs">{t.price}</span>
-                <span className={`font-mono text-[11px] ${t.change >= 0 ? "text-up" : "text-down"}`}>
-                  {t.change >= 0 ? "+" : ""}{t.change}%
-                </span>
+                {t.source === "warming" ? (
+                  <span className="inline-flex items-center gap-1 font-mono text-[11px] text-[#0EA5E9]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#0EA5E9] animate-pulse" />connessione…
+                  </span>
+                ) : (
+                  <>
+                    <span className="font-mono text-xs">{t.price}</span>
+                    <span className={`font-mono text-[11px] ${t.change >= 0 ? "text-up" : "text-down"}`}>
+                      {t.change >= 0 ? "+" : ""}{t.change}%
+                    </span>
+                  </>
+                )}
               </span>
             ))}
           </div>

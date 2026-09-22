@@ -45,6 +45,7 @@ export default function Watchlist({ selected, onSelect }) {
             <div className="space-y-1">
               {list.map((it) => {
                 const up = it.change >= 0;
+                const warming = it.source === "warming";
                 const testid = `market-watchlist-item-${it.symbol.replace("/", "").toLowerCase()}`;
                 return (
                   <button key={it.symbol} data-testid={testid} onClick={() => onSelect(it.symbol)}
@@ -52,12 +53,26 @@ export default function Watchlist({ selected, onSelect }) {
                       selected === it.symbol
                         ? "bg-[#1A2332] border-[#0EA5E9]/50"
                         : "bg-transparent border-transparent hover:bg-[#1A2332] hover:border-[#334155]"}`}>
-                    <span className="text-sm font-semibold">{it.symbol}</span>
+                    <span className="text-sm font-semibold flex items-center gap-1.5">
+                      {it.symbol}
+                      {it.source === "simulated" && (
+                        <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-[#F59E0B]/15 text-[#F59E0B]" title="Simbolo non disponibile su Tickmill demo: prezzo simulato">SIM</span>
+                      )}
+                    </span>
                     <div className="text-right">
-                      <div className="font-mono text-xs">{it.price}</div>
-                      <div className={`font-mono text-[10px] ${up ? "text-up" : "text-down"}`}>
-                        {up ? "+" : ""}{it.change}%
-                      </div>
+                      {warming ? (
+                        <div className="flex items-center gap-1 font-mono text-[10px] text-[#0EA5E9]">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#0EA5E9] animate-pulse" />
+                          connessione…
+                        </div>
+                      ) : (
+                        <>
+                          <div className="font-mono text-xs">{it.price}</div>
+                          <div className={`font-mono text-[10px] ${up ? "text-up" : "text-down"}`}>
+                            {up ? "+" : ""}{it.change}%
+                          </div>
+                        </>
+                      )}
                     </div>
                   </button>
                 );

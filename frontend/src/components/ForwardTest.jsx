@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { LineChart, Line, YAxis, ResponsiveContainer, Tooltip } from "recharts";
-import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target, Brain, CheckCircle2, XCircle } from "lucide-react";
+import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target, Brain, CheckCircle2, XCircle, Clock, Copy } from "lucide-react";
 
 const PERIODS = [
   ["Settimana", "M15", 480],
@@ -35,6 +35,7 @@ export default function ForwardTest({ symbol }) {
   const [oosLoading, setOosLoading] = useState(false);
   const [disc, setDisc] = useState(null);
   const [discLoading, setDiscLoading] = useState(false);
+  const [intraday, setIntraday] = useState({});
   const discPoll = useRef(null);
   const timer = useRef(null);
 
@@ -43,7 +44,28 @@ export default function ForwardTest({ symbol }) {
     setRes(null); setPlaying(false); setIdx(0); setOpt(null); setOos(null); setDisc(null);
     if (discPoll.current) clearInterval(discPoll.current);
   }, [symbol]);
+  useEffect(() => { setIntraday({}); }, [res]);
   useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); }, []);
+
+  const isDaily = res && (res.timeframe === "D1" || res.timeframe === "D");
+
+  const fetchIntraday = async (i, t) => {
+    setIntraday((s) => ({ ...s, [i]: { loading: true } }));
+    try {
+      const { data } = await api.post("/forwardtest/intraday", {
+        symbol, side: t.side, sl: t.sl, tp: t.tp,
+        entry_time: t.entry_time, exit_time: t.exit_time });
+      setIntraday((s) => ({ ...s, [i]: { loading: false, ...data } }));
+      if (!data.available) toast.message("Dati H1 non disponibili per questo periodo");
+    } catch { setIntraday((s) => ({ ...s, [i]: { loading: false, available: false } })); }
+  };
+
+  const copyMt5 = (t) => {
+    const d = (t.entry_time || "").slice(0, 10);
+    const txt = `${symbol} ${d}`;
+    if (navigator.clipboard) navigator.clipboard.writeText(txt);
+    toast.success(`Copiato per MT5: ${txt}`);
+  };
 
   const runDiscover = async () => {
     setDiscLoading(true); setDisc(null);
@@ -563,8 +585,10 @@ export default function ForwardTest({ symbol }) {
                     <th className="py-2 px-2 font-normal text-right">Prezzo Out</th>
                     <th className="py-2 px-2 font-normal text-right hidden sm:table-cell">SL</th>
                     <th className="py-2 px-2 font-normal text-right hidden sm:table-cell">TP</th>
+                    <th className="py-2 px-2 font-normal text-right hidden md:table-cell">Durata</th>
                     <th className="py-2 px-2 font-normal text-center">Esito</th>
                     <th className="py-2 px-2 font-normal text-right">PnL</th>
+                    <th className="py-2 px-2 font-normal text-center">MT5</th>
                   </tr>
                 </thead>
                 <tbody className="font-mono text-[11px]">
@@ -578,12 +602,25 @@ export default function ForwardTest({ symbol }) {
                       </td>
                       <td className="py-1.5 px-2 text-right">{t.entry}</td>
                       <td className="py-1.5 px-2 text-[#94A3B8]">
-                        {t.result === "open" ? "—" : fmtDate(t.exit_time, !(res.timeframe === "D1" || res.timeframe === "D"))}
-                        {t.intrabar && (res.timeframe === "D1" || res.timeframe === "D") && <span className="text-[#475569]"> ·intraday</span>}
+                        {t.result === "open" ? "—" : fmtDate(t.exit_time, !isDaily)}
+                        {t.intrabar && isDaily && t.result !== "open" && (
+                          intraday[i]?.found ? (
+                            <span className="text-[#38BDF8]"> ·{fmtDate(intraday[i].time, true).slice(-5)} {intraday[i].ambiguous ? "SL/TP?" : intraday[i].level}</span>
+                          ) : intraday[i]?.available === false ? (
+                            <span className="text-[#475569]"> ·intraday n/d</span>
+                          ) : (
+                            <button data-testid={`intraday-btn-${i}`} onClick={() => fetchIntraday(i, t)} disabled={intraday[i]?.loading}
+                              className="ml-1 inline-flex items-center gap-0.5 text-[#475569] hover:text-[#38BDF8] transition-colors" title="Trova l'ora esatta (H1)">
+                              {intraday[i]?.loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Clock className="w-3 h-3" />intraday</>}
+                            </button>
+                          )
+                        )}
                       </td>
                       <td className="py-1.5 px-2 text-right">{t.exit}</td>
                       <td className="py-1.5 px-2 text-right text-down hidden sm:table-cell">{t.sl}</td>
                       <td className="py-1.5 px-2 text-right text-up hidden sm:table-cell">{t.tp}</td>
+                      <td className="py-1.5 px-2 text-right text-[#94A3B8] hidden md:table-cell">
+                        {t.duration_days != null ? `${t.duration_days}g` : "—"}</td>
                       <td className="py-1.5 px-2 text-center">
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                           t.result === "win" ? "bg-[#10B981]/10 text-up"
@@ -593,6 +630,12 @@ export default function ForwardTest({ symbol }) {
                       </td>
                       <td className={`py-1.5 px-2 text-right font-semibold ${t.pnl >= 0 ? "text-up" : "text-down"}`}>
                         {t.pnl >= 0 ? "+" : ""}€{t.pnl}</td>
+                      <td className="py-1.5 px-2 text-center">
+                        <button data-testid={`copy-mt5-btn-${i}`} onClick={() => copyMt5(t)} title="Copia simbolo+data per MT5"
+                          className="inline-flex text-[#475569] hover:text-[#38BDF8] transition-colors">
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
