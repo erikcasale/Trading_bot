@@ -934,6 +934,174 @@ async def _run_intraday_all(job_id, symbol, trades):
         job["error"] = str(e)[:200]
 
 
+CONTRACT_SIZE = {"EUR/USD": 100000, "GBP/USD": 100000, "USD/CHF": 100000,
+                 "USD/CAD": 100000, "AUD/USD": 100000, "XAU/USD": 100, "US30": 1}
+
+
+class NoslReq(BaseModel):
+    start_date: str = "2026-01-01"
+    start_balance: float = 10000.0
+    lot_per_10k: float = 0.1
+
+
+@api_router.post("/portfolio/nosl")
+async def portfolio_nosl(body: NoslReq, user: dict = Depends(get_current_user)):
+    """EXPERIMENT: trade WITHOUT stop loss, position size compounding with the
+    account (lot = lot_per_10k * equity/10000). Shows the true mark-to-market
+    equity so open losing trades (which never get stopped) are fully visible."""
+    job_id = str(uuid.uuid4())
+    _portfolio_jobs[job_id] = {"status": "running", "result": None, "error": None,
+                               "done": 0, "total": len(PORTFOLIO_SYMBOLS)}
+    _portfolio_jobs[job_id]["task"] = asyncio.create_task(_run_nosl(job_id, body))
+    return {"job_id": job_id, "status": "running", "total": len(PORTFOLIO_SYMBOLS)}
+
+
+async def _run_nosl(job_id, body):
+    try:
+        want = int(5 * 260) + 40
+        data = {}
+        for sym in PORTFOLIO_SYMBOLS:
+            candles, source = await _get_d1_history(sym, want)
+            data[sym] = (candles, source)
+            job = _portfolio_jobs[job_id]
+            job["done"] += 1
+        for sym in [s for s, (_, src) in data.items() if src != "real"]:
+            candles, source = await _get_d1_history(sym, want)
+            if source == "real":
+                data[sym] = (candles, source)
+        result = await asyncio.to_thread(_nosl_compute, data, body.start_date,
+                                         body.start_balance, body.lot_per_10k)
+        if result is None:
+            _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": "Storico insufficiente"}
+            return
+        _portfolio_jobs[job_id] = {"status": "done", "result": result, "error": None}
+    except Exception as e:
+        logger.exception("nosl job failed")
+        _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
+
+
+def _nosl_compute(data, start_date, start_balance, lot_per_10k):
+    try:
+        start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
+    except Exception:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def pt(iso):
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+
+    positions, real_syms, sim_syms = [], [], []
+    price_on, all_dates = {}, set()
+    for sym, (candles, source) in data.items():
+        if not candles or len(candles) < 200:
+            continue
+        (real_syms if source == "real" else sim_syms).append(sym)
+        cfg = INSTRUMENTS[sym]
+        contract = CONTRACT_SIZE.get(sym, 100000)
+        train = [c for c in candles if pt(c["time"]) < start]
+        if len(train) < 120:
+            continue
+        params = _pick_params(train, cfg)
+        if params is None:
+            continue
+        price_on[sym] = {}
+        for c in candles:
+            d = pt(c["time"]).date()
+            price_on[sym][d] = c["c"]
+            if pt(c["time"]) >= start:
+                all_dates.add(d)
+        full = run_forward_test(candles, cfg, 1.0, params=params)
+        last_c = candles[-1]
+        for t in full["trades"]:
+            try:
+                ei = t["entry_index"]
+                et = pt(t["entry_time"])
+            except Exception:
+                continue
+            if et < start:
+                continue
+            side, entry, tp = t["side"], t["entry"], t["tp"]
+            direction = 1 if side == "BUY" else -1
+            # NO stop loss: close only when TP is touched, else stay open to the end
+            exit_price, exit_t, is_open = last_c["c"], pt(last_c["time"]), True
+            for j in range(ei + 1, len(candles)):
+                cj = candles[j]
+                if (side == "BUY" and cj["h"] >= tp) or (side == "SELL" and cj["l"] <= tp):
+                    exit_price, exit_t, is_open = tp, pt(candles[j + 1]["time"]) if j + 1 < len(candles) else pt(cj["time"]), False
+                    break
+            positions.append({"sym": sym, "side": side, "dir": direction, "entry": entry,
+                              "tp": tp, "entry_t": et, "exit_t": exit_t, "exit": exit_price,
+                              "contract": contract, "open": is_open})
+    if not positions:
+        return None
+
+    # event-driven realized equity with COMPOUNDING lot sizing
+    events = []
+    for p in positions:
+        events.append((p["entry_t"], 0, p))
+        events.append((p["exit_t"], 1, p))
+    events.sort(key=lambda e: (e[0], e[1]))
+    equity, wiped, wipe_date = start_balance, False, None
+    for tm, typ, p in events:
+        if typ == 0:
+            if equity <= 0:
+                p["skip"] = True
+                continue
+            p["lot"] = max(0.01, round(lot_per_10k * equity / 10000.0, 2))
+        else:
+            if p.get("skip") or p["open"]:
+                continue  # open trades stay floating; only closed TP trades hit realized
+            p["pnl"] = round(p["lot"] * p["contract"] * (p["exit"] - p["entry"]) * p["dir"], 2)
+            equity += p["pnl"]
+    realized_final = round(equity, 2)
+
+    # daily MARK-TO-MARKET equity (floating of open no-SL trades included)
+    sym_net = {}
+    for p in positions:
+        if not p.get("skip") and "pnl" in p:
+            sym_net[p["sym"]] = round(sym_net.get(p["sym"], 0) + p["pnl"], 2)
+    curve, peak, max_dd, min_eq = [], start_balance, 0.0, start_balance
+    wipe_date = None
+    for d in sorted(all_dates):
+        realized = sum(p["pnl"] for p in positions if not p.get("skip") and "pnl" in p and p["exit_t"].date() <= d)
+        floating = 0.0
+        for p in positions:
+            if p.get("skip") or "lot" not in p:
+                continue
+            if p["entry_t"].date() <= d and (p["open"] or d < p["exit_t"].date()):
+                px = price_on.get(p["sym"], {}).get(d)
+                if px is not None:
+                    floating += p["lot"] * p["contract"] * (px - p["entry"]) * p["dir"]
+        mtm = start_balance + realized + floating
+        peak = max(peak, mtm)
+        max_dd = max(max_dd, (peak - mtm) / peak * 100 if peak > 0 else 100)
+        min_eq = min(min_eq, mtm)
+        if mtm <= 0 and wipe_date is None:
+            wipe_date = d.isoformat()
+        curve.append(round(mtm, 2))
+    wiped = wipe_date is not None
+    true_final = curve[-1] if curve else realized_final
+
+    closed = [p for p in positions if not p.get("skip") and not p["open"]]
+    open_p = [p for p in positions if not p.get("skip") and p["open"]]
+    open_float = round(sum((price_on[p["sym"]][max(price_on[p["sym"]])] - p["entry"]) * p["dir"] * p["lot"] * p["contract"]
+                           for p in open_p if p.get("lot")), 2)
+    per_symbol = sorted([{"symbol": s, "net": n} for s, n in sym_net.items()], key=lambda x: -x["net"])
+    end = max((p["exit_t"] for p in positions), default=start)
+    return {
+        "mode": "nosl_compound", "start_date": start.date().isoformat(),
+        "end_date": end.date().isoformat(), "start_balance": round(start_balance, 2),
+        "lot_per_10k": lot_per_10k, "realized_balance": realized_final,
+        "true_equity": round(true_final, 2), "net_true": round(true_final - start_balance, 2),
+        "return_true_percent": round((true_final - start_balance) / start_balance * 100, 1),
+        "max_drawdown": round(max_dd, 2), "min_equity": round(min_eq, 2),
+        "wiped": wiped, "wipe_date": wipe_date,
+        "closed_trades": len(closed), "tp_wins": len(closed),
+        "open_trades": len(open_p), "open_floating": open_float,
+        "per_symbol": per_symbol, "real_symbols": real_syms, "sim_symbols": sim_syms,
+        "equity_curve": curve,
+    }
+
+
 class PortfolioReq(BaseModel):
     start_date: str = "2025-01-01"
     start_balance: float = 10000.0

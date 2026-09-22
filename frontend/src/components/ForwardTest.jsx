@@ -40,6 +40,9 @@ export default function ForwardTest({ symbol }) {
   const [pf, setPf] = useState(null);
   const [pfState, setPfState] = useState({ loading: false, done: 0, total: 7 });
   const [pfWalk, setPfWalk] = useState(true);
+  const [nosl, setNosl] = useState(null);
+  const [noslState, setNoslState] = useState({ loading: false, done: 0, total: 7 });
+  const noslPoll = useRef(null);
   const pfPoll = useRef(null);
   const intradayPoll = useRef(null);
   const discPoll = useRef(null);
@@ -51,7 +54,7 @@ export default function ForwardTest({ symbol }) {
     if (discPoll.current) clearInterval(discPoll.current);
   }, [symbol]);
   useEffect(() => { setIntraday({}); setIntradayAll({ loading: false, done: 0, total: 0 }); }, [res]);
-  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); if (pfPoll.current) clearInterval(pfPoll.current); }, []);
+  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); if (pfPoll.current) clearInterval(pfPoll.current); if (noslPoll.current) clearInterval(noslPoll.current); }, []);
 
   const runPortfolio = async () => {
     if (pfPoll.current) clearInterval(pfPoll.current);
@@ -75,6 +78,32 @@ export default function ForwardTest({ symbol }) {
         } catch { /* keep polling */ }
       }, 4000);
     } catch { setPfState({ loading: false, done: 0, total: 7 }); toast.error("Impossibile avviare il backtest"); }
+  };
+
+  const runNosl = async () => {
+    if (noslPoll.current) clearInterval(noslPoll.current);
+    setNosl(null); setNoslState({ loading: true, done: 0, total: 7 });
+    try {
+      const { data } = await api.post("/portfolio/nosl", { start_date: "2026-01-01", start_balance: 10000, lot_per_10k: 0.1 });
+      const jobId = data.job_id;
+      let ticks = 0;
+      noslPoll.current = setInterval(async () => {
+        ticks += 1;
+        try {
+          const { data: st } = await api.get(`/portfolio/backtest/${jobId}`);
+          setNoslState({ loading: st.status === "running", done: st.done || 0, total: st.total || 7 });
+          if (st.status === "done") {
+            clearInterval(noslPoll.current); setNosl(st.result); setNoslState({ loading: false, done: 7, total: 7 });
+            st.result.wiped
+              ? toast.error(`Conto AZZERATO il ${st.result.wipe_date}`)
+              : toast.message(`Equity reale (mark-to-market): €${st.result.true_equity.toLocaleString("it-IT")}`);
+          } else if (st.status === "error" || ticks > 90) {
+            clearInterval(noslPoll.current); setNoslState({ loading: false, done: 0, total: 7 });
+            toast.error(st.error || "Test non riuscito");
+          }
+        } catch { /* keep polling */ }
+      }, 4000);
+    } catch { setNoslState({ loading: false, done: 0, total: 7 }); toast.error("Impossibile avviare il test"); }
   };
 
   const exportPortfolioCsv = () => {
@@ -351,6 +380,57 @@ export default function ForwardTest({ symbol }) {
               <FastForward className="w-3.5 h-3.5" /> Salta alla fine
             </button>
           </>
+        )}
+      </div>
+
+      {/* NO-SL compounding experiment (2026) — high risk, shows true MTM equity */}
+      <div data-testid="nosl-panel" className="mb-3 rounded-lg border border-[#EF4444]/40 bg-[#EF4444]/5 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-[#EF4444]" />
+            <span className="font-head font-bold text-sm">Test SENZA Stop Loss</span>
+            <span className="overline">2026 · size composta 0,1 lotti / €10k · €10k</span>
+          </div>
+          <button data-testid="nosl-run-button" onClick={runNosl} disabled={noslState.loading}
+            className="inline-flex items-center gap-1.5 bg-[#EF4444] hover:bg-[#DC2626] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+            {noslState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+            {noslState.loading ? `Scarico dati ${noslState.done}/${noslState.total}…` : "Avvia test senza SL"}
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
+          Nessuno stop loss: le posizioni in perdita <b className="text-[#EF4444]">restano aperte</b> finché non tornano in profitto (o mai). La size cresce col conto (0,1 lotti ogni €10k → interesse composto).
+          Mostriamo l'<b className="text-white">equity reale mark-to-market</b> (incluse le perdite aperte), non solo i trade chiusi: è così che si vede il rischio vero di questo approccio.
+        </p>
+
+        {nosl && (
+          <div data-testid="nosl-result" className="mt-3 space-y-2 fade-up">
+            {nosl.sim_symbols?.length > 0 && (
+              <div className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/10 border border-[#F59E0B]/40 rounded-lg p-2">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{nosl.sim_symbols.join(", ")}: dati simulati (broker non raggiungibile). Riprova per averli reali.</span>
+              </div>
+            )}
+            {nosl.wiped && (
+              <div data-testid="nosl-wiped" className="flex items-center gap-2 text-[12px] font-bold text-[#EF4444] bg-[#EF4444]/10 border border-[#EF4444]/50 rounded-lg p-2.5">
+                <XCircle className="w-4 h-4" /> CONTO AZZERATO il {nosl.wipe_date} — margin call: l'approccio senza SL ha bruciato il capitale.
+              </div>
+            )}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <BigStat testid="nosl-true-equity" label="Equity reale (MTM)" value={`€${nosl.true_equity.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} sub={`${nosl.return_true_percent >= 0 ? "+" : ""}${nosl.return_true_percent}%`} color={nosl.net_true >= 0 ? "#10B981" : "#EF4444"} />
+              <BigStat label="Solo trade chiusi" value={`€${nosl.realized_balance.toLocaleString("it-IT")}`} sub={`${nosl.tp_wins} TP chiusi`} color="#0EA5E9" />
+              <BigStat label="Perdita max (MTM)" value={`-${nosl.max_drawdown}%`} sub={`minimo €${nosl.min_equity.toLocaleString("it-IT")}`} color="#EF4444" />
+              <BigStat label="Aperte / Floating" value={`${nosl.open_trades}`} sub={`${nosl.open_floating >= 0 ? "+" : ""}€${nosl.open_floating.toLocaleString("it-IT")} non realizz.`} color="#F59E0B" />
+            </div>
+            <ResponsiveContainer width="100%" height={100}>
+              <LineChart data={nosl.equity_curve.map((e, i) => ({ i, e }))}>
+                <YAxis domain={["dataMin", "dataMax"]} hide />
+                <Line type="monotone" dataKey="e" stroke={nosl.net_true >= 0 ? "#10B981" : "#EF4444"} strokeWidth={1.6} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+            <p className="text-[10px] text-[#EF4444] leading-relaxed">
+              ⚠️ I "trade chiusi" possono sembrare quasi tutti vincenti (chiudono solo al TP), ma le perdite restano aperte e affondano l'equity reale. Un alto tasso di vincite qui è ingannevole: conta l'equity mark-to-market. Approccio ad altissimo rischio, a scopo dimostrativo.
+            </p>
+          </div>
         )}
       </div>
 
