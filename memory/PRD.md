@@ -59,6 +59,13 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - Coerenza contabile verificata: 148.935,21 + (-149.239,09) = -303,88 = true_equity. ✓
 - CONCLUSIONE ONESTA: su dati reali, la strategia senza SL con size composta AZZERA il conto entro un mese nonostante il 100% di trade chiusi "vinti". Conferma definitiva che il no-SL è catastrofico.
 
+## RUN REALE no-SL 2026 — SOLO FOREX + CAP 10 posizioni (2026-06) — DATI REALI 5/5
+- Richiesta utente: "Limitiamo i trade contemporanei a 10 e vediamo che succede. E fai trading solo su forex al momento."
+- Backend: aggiunto `NoslReq.max_concurrent` (default 10) e `FOREX_SYMBOLS` (EUR/USD, GBP/USD, USD/CHF, USD/CAD, AUD/USD). `_run_nosl` ora usa solo forex; `_nosl_compute` applica un cap di posizioni contemporanee nel loop event-driven (open_count: entry skippata se open_count>=max_concurrent). Frontend `ForwardTest.jsx` aggiornato (label "solo forex · max 10 aperte", total 5, payload max_concurrent:10).
+- ESITO (dati reali 5/5, sim vuoto): saldo "solo chiusi" €11.577,29 (13/13 TP); equity reale MTM **€8.545,15 (-14,5%)**; **NON azzerato** (il cap ha evitato il wipeout precedente); 10 posizioni aperte (= esattamente il cap) con floating -€3.032,14; max DD MTM 19,46%; min equity €8.060.
+- Coerenza contabile: 11.577,29 + (-3.032,14) = 8.545,15 = true_equity. ✓
+- CONFRONTO: senza cap e con XAU/US30 → conto azzerato (-€149k floating). Con cap 10 + solo forex → il conto sopravvive ma perde comunque -14,5% in equity reale nonostante 13/13 trade chiusi "vinti". Il no-SL resta perdente in termini di equity reale.
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.

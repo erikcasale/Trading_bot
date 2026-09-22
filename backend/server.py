@@ -942,6 +942,7 @@ class NoslReq(BaseModel):
     start_date: str = "2026-01-01"
     start_balance: float = 10000.0
     lot_per_10k: float = 0.1
+    max_concurrent: int = 10
 
 
 @api_router.post("/portfolio/nosl")
@@ -951,16 +952,16 @@ async def portfolio_nosl(body: NoslReq, user: dict = Depends(get_current_user)):
     equity so open losing trades (which never get stopped) are fully visible."""
     job_id = str(uuid.uuid4())
     _portfolio_jobs[job_id] = {"status": "running", "result": None, "error": None,
-                               "done": 0, "total": len(PORTFOLIO_SYMBOLS)}
+                               "done": 0, "total": len(FOREX_SYMBOLS)}
     _portfolio_jobs[job_id]["task"] = asyncio.create_task(_run_nosl(job_id, body))
-    return {"job_id": job_id, "status": "running", "total": len(PORTFOLIO_SYMBOLS)}
+    return {"job_id": job_id, "status": "running", "total": len(FOREX_SYMBOLS)}
 
 
 async def _run_nosl(job_id, body):
     try:
         want = int(5 * 260) + 40
         data = {}
-        for sym in PORTFOLIO_SYMBOLS:
+        for sym in FOREX_SYMBOLS:
             candles, source = await _get_d1_history(sym, want)
             data[sym] = (candles, source)
             job = _portfolio_jobs[job_id]
@@ -970,7 +971,8 @@ async def _run_nosl(job_id, body):
             if source == "real":
                 data[sym] = (candles, source)
         result = await asyncio.to_thread(_nosl_compute, data, body.start_date,
-                                         body.start_balance, body.lot_per_10k)
+                                         body.start_balance, body.lot_per_10k,
+                                         body.max_concurrent)
         if result is None:
             _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": "Storico insufficiente"}
             return
@@ -980,7 +982,7 @@ async def _run_nosl(job_id, body):
         _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
 
 
-def _nosl_compute(data, start_date, start_balance, lot_per_10k):
+def _nosl_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=10):
     try:
         start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
     except Exception:
@@ -1041,14 +1043,19 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k):
         events.append((p["exit_t"], 1, p))
     events.sort(key=lambda e: (e[0], e[1]))
     equity, wiped, wipe_date = start_balance, False, None
+    open_count = 0
     for tm, typ, p in events:
         if typ == 0:
-            if equity <= 0:
+            if equity <= 0 or open_count >= max_concurrent:
                 p["skip"] = True
                 continue
             p["lot"] = max(0.01, round(lot_per_10k * equity / 10000.0, 2))
+            open_count += 1
         else:
-            if p.get("skip") or p["open"]:
+            if p.get("skip"):
+                continue
+            open_count -= 1
+            if p["open"]:
                 continue  # open trades stay floating; only closed TP trades hit realized
             p["pnl"] = round(p["lot"] * p["contract"] * (p["exit"] - p["entry"]) * p["dir"], 2)
             equity += p["pnl"]
@@ -1090,7 +1097,8 @@ def _nosl_compute(data, start_date, start_balance, lot_per_10k):
     return {
         "mode": "nosl_compound", "start_date": start.date().isoformat(),
         "end_date": end.date().isoformat(), "start_balance": round(start_balance, 2),
-        "lot_per_10k": lot_per_10k, "realized_balance": realized_final,
+        "lot_per_10k": lot_per_10k, "max_concurrent": max_concurrent,
+        "realized_balance": realized_final,
         "true_equity": round(true_final, 2), "net_true": round(true_final - start_balance, 2),
         "return_true_percent": round((true_final - start_balance) / start_balance * 100, 1),
         "max_drawdown": round(max_dd, 2), "min_equity": round(min_eq, 2),
@@ -1110,6 +1118,7 @@ class PortfolioReq(BaseModel):
 
 
 PORTFOLIO_SYMBOLS = ["EUR/USD", "GBP/USD", "USD/CHF", "USD/CAD", "AUD/USD", "XAU/USD", "US30"]
+FOREX_SYMBOLS = ["EUR/USD", "GBP/USD", "USD/CHF", "USD/CAD", "AUD/USD"]
 _portfolio_jobs = {}
 
 

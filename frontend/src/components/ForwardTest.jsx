@@ -41,7 +41,7 @@ export default function ForwardTest({ symbol }) {
   const [pfState, setPfState] = useState({ loading: false, done: 0, total: 7 });
   const [pfWalk, setPfWalk] = useState(true);
   const [nosl, setNosl] = useState(null);
-  const [noslState, setNoslState] = useState({ loading: false, done: 0, total: 7 });
+  const [noslState, setNoslState] = useState({ loading: false, done: 0, total: 5 });
   const noslPoll = useRef(null);
   const pfPoll = useRef(null);
   const intradayPoll = useRef(null);
@@ -82,23 +82,23 @@ export default function ForwardTest({ symbol }) {
 
   const runNosl = async () => {
     if (noslPoll.current) clearInterval(noslPoll.current);
-    setNosl(null); setNoslState({ loading: true, done: 0, total: 7 });
+    setNosl(null); setNoslState({ loading: true, done: 0, total: 5 });
     try {
-      const { data } = await api.post("/portfolio/nosl", { start_date: "2026-01-01", start_balance: 10000, lot_per_10k: 0.1 });
+      const { data } = await api.post("/portfolio/nosl", { start_date: "2026-01-01", start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10 });
       const jobId = data.job_id;
       let ticks = 0;
       noslPoll.current = setInterval(async () => {
         ticks += 1;
         try {
           const { data: st } = await api.get(`/portfolio/backtest/${jobId}`);
-          setNoslState({ loading: st.status === "running", done: st.done || 0, total: st.total || 7 });
+          setNoslState({ loading: st.status === "running", done: st.done || 0, total: st.total || 5 });
           if (st.status === "done") {
-            clearInterval(noslPoll.current); setNosl(st.result); setNoslState({ loading: false, done: 7, total: 7 });
+            clearInterval(noslPoll.current); setNosl(st.result); setNoslState({ loading: false, done: 5, total: 5 });
             st.result.wiped
               ? toast.error(`Conto AZZERATO il ${st.result.wipe_date}`)
               : toast.message(`Equity reale (mark-to-market): €${st.result.true_equity.toLocaleString("it-IT")}`);
           } else if (st.status === "error" || ticks > 90) {
-            clearInterval(noslPoll.current); setNoslState({ loading: false, done: 0, total: 7 });
+            clearInterval(noslPoll.current); setNoslState({ loading: false, done: 0, total: 5 });
             toast.error(st.error || "Test non riuscito");
           }
         } catch { /* keep polling */ }
@@ -389,7 +389,7 @@ export default function ForwardTest({ symbol }) {
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-[#EF4444]" />
             <span className="font-head font-bold text-sm">Test SENZA Stop Loss</span>
-            <span className="overline">2026 · size composta 0,1 lotti / €10k · €10k</span>
+            <span className="overline">2026 · solo forex · max 10 aperte · size composta 0,1 lotti / €10k · €10k</span>
           </div>
           <button data-testid="nosl-run-button" onClick={runNosl} disabled={noslState.loading}
             className="inline-flex items-center gap-1.5 bg-[#EF4444] hover:bg-[#DC2626] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
@@ -399,7 +399,7 @@ export default function ForwardTest({ symbol }) {
         </div>
         <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
           Nessuno stop loss: le posizioni in perdita <b className="text-[#EF4444]">restano aperte</b> finché non tornano in profitto (o mai). La size cresce col conto (0,1 lotti ogni €10k → interesse composto).
-          Mostriamo l'<b className="text-white">equity reale mark-to-market</b> (incluse le perdite aperte), non solo i trade chiusi: è così che si vede il rischio vero di questo approccio.
+          Solo forex (5 major), <b className="text-white">massimo 10 posizioni contemporanee</b>. Mostriamo l'<b className="text-white">equity reale mark-to-market</b> (incluse le perdite aperte), non solo i trade chiusi: è così che si vede il rischio vero di questo approccio.
         </p>
 
         {nosl && (
