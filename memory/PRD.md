@@ -52,6 +52,13 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - Risultato dimostrativo (dati simulati, MetaApi disconnesso al test): solo chiusi ~€16.473 (85 TP, sembra +65%) MA equity reale MTM ~€10.432 (+4,3%) con -€6.041 di floating aperto → dimostra che l'alto win-rate senza SL è INGANNEVOLE.
 - NOTA RICORRENTE: l'account MetaApi demo (590b1207) si disconnette spesso → i backtest ripiegano su dati SIMULATI (marcati). Riconnettere/riprovare per dati reali.
 
+## RUN REALE no-SL 2026 (2026-06 — account 85584886) — DATI REALI 7/7
+- Account MetaApi cambiato su richiesta utente: `85584886-eac6-441c-9641-7e8dff74426a` (Erik Demo, TickmillUK-Demo, login 25374750) — CONNECTED e stabile.
+- Test no-SL 2026 (0,10 lot/€10k, interesse composto, 2026-01-01→2026-09-21) eseguito con TUTTI e 7 gli strumenti su dati REALI Tickmill (`sim_symbols: []`).
+- ESITO (dati reali): saldo "solo chiusi" €148.935,21 (64/64 TP, sembra +1389%) MA equity reale MTM **-€303,88 → CONTO AZZERATO (wiped) il 2026-02-01**; 40 posizioni aperte con floating -€149.239,09; min equity -€46.180; return reale -103%.
+- Coerenza contabile verificata: 148.935,21 + (-149.239,09) = -303,88 = true_equity. ✓
+- CONCLUSIONE ONESTA: su dati reali, la strategia senza SL con size composta AZZERA il conto entro un mese nonostante il 100% di trade chiusi "vinti". Conferma definitiva che il no-SL è catastrofico.
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.
