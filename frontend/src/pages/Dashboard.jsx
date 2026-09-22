@@ -5,7 +5,6 @@ import Watchlist from "@/components/Watchlist";
 import CandleChart from "@/components/CandleChart";
 import AiPanel from "@/components/AiPanel";
 import BotPanel from "@/components/BotPanel";
-import BacktestPanel from "@/components/BacktestPanel";
 import ForwardTest from "@/components/ForwardTest";
 import PositionsTable from "@/components/PositionsTable";
 
@@ -48,7 +47,6 @@ export default function Dashboard() {
 
           <div className="lg:col-span-6 xl:col-span-7 space-y-4">
             <CandleChart symbol={symbol} setup={setup} />
-            <BacktestPanel symbol={symbol} />
           </div>
 
           <div className="lg:col-span-3 space-y-4">

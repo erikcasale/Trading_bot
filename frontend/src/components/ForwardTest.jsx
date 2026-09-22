@@ -23,7 +23,6 @@ const fmtDate = (iso, withTime = true) => {
 
 export default function ForwardTest({ symbol }) {
   const [period, setPeriod] = useState("Trimestre");
-  const [mode, setMode] = useState("highwinrate");
   const [loading, setLoading] = useState(false);
   const [res, setRes] = useState(null);
   const [idx, setIdx] = useState(0);
@@ -43,7 +42,7 @@ export default function ForwardTest({ symbol }) {
     setLoading(true); setPlaying(false);
     const [, tf, bars] = PERIODS.find((p) => p[0] === period);
     try {
-      const { data } = await api.post("/forwardtest/run", { symbol, timeframe: tf, bars, mode });
+      const { data } = await api.post("/forwardtest/run", { symbol, timeframe: tf, bars, mode: "balanced" });
       setRes(data);
       setIdx(data.warmup || 45);
       setPlaying(true);
@@ -155,14 +154,8 @@ export default function ForwardTest({ symbol }) {
           ))}
         </div>
         {/* modalità */}
-        <div className="flex items-center gap-1 p-0.5 rounded-lg bg-[#0B0E17] border border-[#1E293B]">
-          {[["highwinrate", "Alto Winrate"], ["balanced", "Bilanciato"], ["nosl", "Senza SL"]].map(([m, l]) => (
-            <button key={m} data-testid={`forwardtest-mode-${m}`} onClick={() => setMode(m)}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
-                mode === m ? "bg-[#1A2332] text-[#8B5CF6]" : "text-[#64748B] hover:text-[#94A3B8]"}`}>
-              {l}
-            </button>
-          ))}
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-[#10B981]/10 border border-[#10B981]/30 text-[10px] font-mono font-bold text-[#10B981]">
+          <Database className="w-3 h-3" /> COSTI REALI INCLUSI
         </div>
         <button data-testid="forwardtest-run-button" onClick={run} disabled={loading}
           className="inline-flex items-center gap-1.5 bg-[#0EA5E9] hover:bg-[#0284C7] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
@@ -312,9 +305,10 @@ export default function ForwardTest({ symbol }) {
         <div className="h-[280px] flex flex-col items-center justify-center text-center text-[#64748B] border border-dashed border-[#1E293B] rounded-lg">
           <Radio className="w-8 h-8 mb-2 opacity-50" />
           <p className="text-xs max-w-md leading-relaxed">
-            Riproduce le candele una alla volta come fosse tempo reale. Scegli il <b className="text-[#94A3B8]">periodo</b> (fino a
-            "Anno" su candele giornaliere) e la <b className="text-[#94A3B8]">modalità</b>, poi avvia: vedrai equity, trade con
-            date e statistiche live. {ds && !ds.connected && <span className="text-[#F59E0B]">Broker non connesso → dati simulati.</span>}
+            Riproduce le candele una alla volta come fosse tempo reale, applicando la strategia Smart Money con
+            <b className="text-[#94A3B8]"> costi reali inclusi</b>. Scegli il <b className="text-[#94A3B8]">periodo</b> (fino a
+            "Anno" su candele giornaliere), poi avvia: vedrai equity, trade con date e statistiche live al netto dei costi.
+            {" "}{ds && !ds.connected && <span className="text-[#F59E0B]">Broker non connesso → dati simulati.</span>}
           </p>
         </div>
       ) : (
@@ -336,43 +330,17 @@ export default function ForwardTest({ symbol }) {
             <Stat icon={TrendingUp} label="Media W/L" value={`${res.avg_win}/${res.avg_loss}`} color="#F59E0B" />
           </div>
 
-          {/* honesty note for high-winrate mode */}
-          {mode === "highwinrate" && (
-            <div className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/5 border border-[#F59E0B]/30 rounded-lg p-2.5 leading-relaxed">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>
-                Modalità <b>Alto Winrate</b>: tante piccole vincite (media €{res.avg_win}) ma la rara perdita è grande
-                (media €{res.avg_loss}). Il winrate è alto <b>e reale</b>, ma {profitable
-                  ? "il profit factor > 1 su questo periodo — le performance passate NON garantiscono quelle future."
-                  : <span>con profit factor {res.profit_factor} <b>NON è profittevole</b> su questo periodo: winrate alto ≠ guadagno. È esattamente la trappola del "98% winrate".</span>}
-              </span>
-            </div>
-          )}
-
-          {/* reality check for NO-STOP-LOSS mode */}
-          {mode === "nosl" && (
-            <div className="space-y-2">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <Stat icon={Activity} label="Equity REALE" value={`€${res.true_equity.toLocaleString("it-IT")}`}
-                  color={res.true_equity >= res.start_equity ? "#10B981" : "#EF4444"} />
-                <Stat icon={AlertTriangle} label="Flottante Aperto" value={`€${res.open_floating}`}
-                  color={res.open_floating >= 0 ? "#10B981" : "#EF4444"} />
-                <Stat icon={Layers} label="Trade Aperti" value={res.open_trades} color="#F59E0B" />
-                <Stat icon={AlertTriangle} label="Peggior Flottante" value={`€${res.worst_floating}`} color="#EF4444" />
-              </div>
-              <div className="flex items-start gap-2 text-[11px] text-[#EF4444] bg-[#EF4444]/8 border border-[#EF4444]/40 rounded-lg p-2.5 leading-relaxed">
-                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>
-                  <b>SENZA STOP LOSS — l'illusione del 100%.</b> Il winrate sui trade <i>chiusi</i> è {wr}%, ma il conto
-                  reale (mark-to-market) vale <b>€{res.true_equity.toLocaleString("it-IT")}</b>
-                  {res.true_equity < res.start_equity
-                    ? <span> cioè <b>{(((res.true_equity - res.start_equity) / res.start_equity) * 100).toFixed(1)}%</b> — il trade rimasto aperto è a €{res.open_floating} e continua a perdere.</span>
-                    : " ma un solo movimento contrario prolungato azzererebbe tutto."}
-                  {" "}Con la leva, una perdita flottante di €{res.worst_floating} <b>brucia il conto</b>. Ecco perché togliere lo SL non fa guadagnare: nasconde il rischio finché non ti distrugge.
-                </span>
-              </div>
-            </div>
-          )}
+          {/* costs-included note */}
+          <div className="flex items-start gap-2 text-[11px] text-[#94A3B8] bg-[#0B0E17] border border-[#1E293B] rounded-lg p-2.5 leading-relaxed">
+            <Database className="w-4 h-4 shrink-0 mt-0.5 text-[#10B981]" />
+            <span>
+              Ogni operazione include i <b className="text-white">costi reali</b> (spread + commissione + slippage stimati per {symbol}):
+              i numeri qui sono al netto dei costi, quindi credibili. Un Profit Factor
+              <b className={profitable ? " text-[#10B981]" : " text-[#EF4444]"}> {res.profit_factor}</b> {profitable
+                ? "sopra 1 significa che il sistema supera i costi su questo periodo."
+                : "sotto 1 significa che dopo i costi questo periodo è in perdita: è la realtà da cui partire."}
+            </span>
+          </div>
 
           {/* replay chart */}
           <div className="rounded-lg bg-[#0B0E17] border border-[#1E293B] overflow-hidden">

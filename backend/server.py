@@ -81,17 +81,17 @@ async def get_current_user(request: Request) -> dict:
 # Market simulation
 # ---------------------------------------------------------------------------
 INSTRUMENTS = {
-    "EUR/USD":  {"cat": "forex",  "base": 1.0850,  "vol": 0.0009, "digits": 5},
-    "GBP/USD":  {"cat": "forex",  "base": 1.2720,  "vol": 0.0011, "digits": 5},
-    "USD/CHF":  {"cat": "forex",  "base": 0.9050,  "vol": 0.0009, "digits": 5},
-    "USD/CAD":  {"cat": "forex",  "base": 1.3620,  "vol": 0.0011, "digits": 5},
-    "AUD/USD":  {"cat": "forex",  "base": 0.6650,  "vol": 0.0008, "digits": 5},
-    "XAU/USD":  {"cat": "forex",  "base": 2340.0,  "vol": 6.5,    "digits": 2},
-    "BTC/USDT": {"cat": "crypto", "base": 67500.0, "vol": 480.0,  "digits": 1},
-    "ETH/USDT": {"cat": "crypto", "base": 3450.0,  "vol": 34.0,   "digits": 2},
-    "NVDA":     {"cat": "stocks", "base": 121.5,   "vol": 1.3,    "digits": 2},
-    "AAPL":     {"cat": "stocks", "base": 214.0,   "vol": 1.6,    "digits": 2},
-    "US30":     {"cat": "stocks", "base": 39250.0, "vol": 48.0,   "digits": 1},
+    "EUR/USD":  {"cat": "forex",  "base": 1.0850,  "vol": 0.0009, "digits": 5, "spread": 0.00010},
+    "GBP/USD":  {"cat": "forex",  "base": 1.2720,  "vol": 0.0011, "digits": 5, "spread": 0.00012},
+    "USD/CHF":  {"cat": "forex",  "base": 0.9050,  "vol": 0.0009, "digits": 5, "spread": 0.00012},
+    "USD/CAD":  {"cat": "forex",  "base": 1.3620,  "vol": 0.0011, "digits": 5, "spread": 0.00013},
+    "AUD/USD":  {"cat": "forex",  "base": 0.6650,  "vol": 0.0008, "digits": 5, "spread": 0.00011},
+    "XAU/USD":  {"cat": "forex",  "base": 2340.0,  "vol": 6.5,    "digits": 2, "spread": 0.35},
+    "BTC/USDT": {"cat": "crypto", "base": 67500.0, "vol": 480.0,  "digits": 1, "spread": 22.0},
+    "ETH/USDT": {"cat": "crypto", "base": 3450.0,  "vol": 34.0,   "digits": 2, "spread": 2.2},
+    "NVDA":     {"cat": "stocks", "base": 121.5,   "vol": 1.3,    "digits": 2, "spread": 0.04},
+    "AAPL":     {"cat": "stocks", "base": 214.0,   "vol": 1.6,    "digits": 2, "spread": 0.04},
+    "US30":     {"cat": "stocks", "base": 39250.0, "vol": 48.0,   "digits": 1, "spread": 2.5},
 }
 TF_MIN = {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240, "D1": 1440}
 
@@ -526,19 +526,18 @@ async def backtest(body: BacktestReq, user: dict = Depends(get_current_user)):
 # Forward-test (walk-forward) engine
 # ---------------------------------------------------------------------------
 MODE_PRESETS = {
-    "balanced":    {"entry": "smc",     "tp_mult": 2.0, "sl_mult": 1.3, "trend_filter": True},
-    "highwinrate": {"entry": "meanrev", "tp_mult": 0.5, "sl_mult": 8.0, "trend_filter": False},
-    "nosl":        {"entry": "meanrev", "tp_mult": 0.5, "sl_mult": None, "trend_filter": False},
+    "balanced": {"entry": "smc", "tp_mult": 2.0, "sl_mult": 1.3, "trend_filter": True},
 }
 
 
-def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrate", params=None):
+def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced", params=None):
     """Replay candles bar-by-bar; returns trades, mark-to-market equity and stats.
-    Entry/exit are driven by `params` (or a preset from `mode`):
-      entry: 'smc' | 'meanrev' | 'breakout', tp_mult, sl_mult (None=no stop), trend_filter.
-    Deterministic given the candle series (no fabricated numbers)."""
-    p = params or MODE_PRESETS.get(mode, MODE_PRESETS["highwinrate"])
+    Entry/exit driven by `params` (or the 'balanced' Smart Money preset).
+    Real trading costs (spread+commission+slippage) are charged on every trade.
+    Deterministic given the candle series."""
+    p = params or MODE_PRESETS.get(mode, MODE_PRESETS["balanced"])
     d = cfg["digits"]
+    spread = cfg.get("spread", 0.0)
     start_equity = 10000.0
     realized = start_equity
     risk_amt = start_equity * risk_percent / 100.0
@@ -571,11 +570,12 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrat
                     hit = ("win", tr["tp"])
             if hit:
                 result, exit_price = hit
-                pnl = round(money(tr, exit_price), 2)
+                cost = spread / tr["unit"] * risk_amt
+                pnl = round(money(tr, exit_price) - cost, 2)
                 realized = round(realized + pnl, 2)
                 tr.update({"exit_index": i, "exit": round(exit_price, d),
                            "exit_time": candle.get("time"), "result": result,
-                           "pnl": pnl, "mae": round(tr.get("mae", 0.0), 2)})
+                           "pnl": pnl, "cost": round(cost, 2), "mae": round(tr.get("mae", 0.0), 2)})
                 trades.append(tr)
                 open_trade = None
 
@@ -668,9 +668,11 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="highwinrat
     if open_trade:
         tr = open_trade
         last = candles[-1]
-        fl = round(money(tr, last["c"]), 2)
+        cost = spread / tr["unit"] * risk_amt
+        fl = round(money(tr, last["c"]) - cost, 2)
         tr.update({"exit_index": n - 1, "exit": round(last["c"], d), "exit_time": None,
-                   "result": "open", "pnl": fl, "mae": round(tr.get("mae", 0.0), 2)})
+                   "result": "open", "pnl": fl, "cost": round(cost, 2),
+                   "mae": round(tr.get("mae", 0.0), 2)})
         trades.append(tr)
         open_floating = fl
 
@@ -722,7 +724,7 @@ async def forwardtest_run(body: ForwardTestReq, user: dict = Depends(get_current
         raise HTTPException(status_code=404, detail="Strumento non trovato")
     cfg = INSTRUMENTS[body.symbol]
     bars = max(120, min(body.bars, 800))
-    mode = body.mode if body.mode in ("highwinrate", "balanced", "nosl") else "highwinrate"
+    mode = "balanced"
     real = await metaapi_service.fetch_candles(body.symbol, body.timeframe, bars)
     if real and len(real) >= 80:
         candles, source = real[-bars:], "real"
