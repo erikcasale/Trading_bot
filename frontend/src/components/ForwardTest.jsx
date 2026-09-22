@@ -543,8 +543,14 @@ export default function ForwardTest({ symbol }) {
           <div>
             <div className="flex items-center justify-between mb-1">
               <span className="overline">Registro Operazioni · verifica manuale ({res.trades.length})</span>
-              <span className="text-[10px] font-mono text-[#64748B]">date ora broker (UTC+offset MT5)</span>
+              <span className="text-[10px] font-mono text-[#64748B]">orari = ora server broker (MT5)</span>
             </div>
+            {(res.timeframe === "D1" || res.timeframe === "D") && (
+              <div data-testid="forwardtest-d1-note" className="flex items-start gap-1.5 text-[10px] text-[#64748B] mb-1.5 leading-relaxed">
+                <Activity className="w-3 h-3 shrink-0 mt-0.5" />
+                <span>Timeframe <b className="text-[#94A3B8]">giornaliero (D1)</b>: l'<b className="text-[#94A3B8]">entrata è alla chiusura</b> della candela (prezzo esatto). SL/TP vengono toccati <b className="text-[#94A3B8]">in un momento qualsiasi della giornata</b>: mostriamo solo la <b className="text-[#94A3B8]">data</b>, l'orario intraday non è determinabile su D1.</span>
+              </div>
+            )}
             <div className="rounded-lg border border-[#1E293B] bg-[#0B0E17] overflow-x-auto">
               <table data-testid="forwardtest-trades-table" className="w-full text-left">
                 <thead>
@@ -566,9 +572,15 @@ export default function ForwardTest({ symbol }) {
                     <tr key={i} className={`border-b border-[#1E293B]/50 hover:bg-[#131A24] ${t.exit_index <= clampIdx ? "" : "opacity-40"}`}>
                       <td className="py-1.5 px-2 text-[#64748B]">{i + 1}</td>
                       <td className={`py-1.5 px-2 font-bold ${t.side === "BUY" ? "text-up" : "text-down"}`}>{t.side}</td>
-                      <td className="py-1.5 px-2 text-[#94A3B8]">{fmtDate(t.entry_time)}</td>
+                      <td className="py-1.5 px-2 text-[#94A3B8]">
+                        {fmtDate(t.entry_time, !(res.timeframe === "D1" || res.timeframe === "D"))}
+                        {(res.timeframe === "D1" || res.timeframe === "D") && <span className="text-[#475569]"> ·chiusura</span>}
+                      </td>
                       <td className="py-1.5 px-2 text-right">{t.entry}</td>
-                      <td className="py-1.5 px-2 text-[#94A3B8]">{fmtDate(t.exit_time)}</td>
+                      <td className="py-1.5 px-2 text-[#94A3B8]">
+                        {t.result === "open" ? "—" : fmtDate(t.exit_time, !(res.timeframe === "D1" || res.timeframe === "D"))}
+                        {t.intrabar && (res.timeframe === "D1" || res.timeframe === "D") && <span className="text-[#475569]"> ·intraday</span>}
+                      </td>
                       <td className="py-1.5 px-2 text-right">{t.exit}</td>
                       <td className="py-1.5 px-2 text-right text-down hidden sm:table-cell">{t.sl}</td>
                       <td className="py-1.5 px-2 text-right text-up hidden sm:table-cell">{t.tp}</td>

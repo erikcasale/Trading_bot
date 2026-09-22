@@ -589,6 +589,13 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced",
     peak, max_dd = start_equity, 0.0
     n = len(candles)
 
+    def _bar_close_time(i):
+        # a bar's CLOSE prints at the next bar's open; that's the real moment
+        # the close price (and thus our entry) actually occurred
+        if i + 1 < n:
+            return candles[i + 1].get("time")
+        return candles[i].get("time")
+
     def money(tr, price):
         dirn = 1 if tr["side"] == "BUY" else -1
         return dirn * (price - tr["entry"]) / tr["unit"] * risk_amt
@@ -617,7 +624,8 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced",
                 pnl = round(money(tr, exit_price) - cost, 2)
                 realized = round(realized + pnl, 2)
                 tr.update({"exit_index": i, "exit": round(exit_price, d),
-                           "exit_time": candle.get("time"), "result": result,
+                           "exit_time": _bar_close_time(i), "result": result,
+                           "intrabar": True,
                            "pnl": pnl, "cost": round(cost, 2), "mae": round(tr.get("mae", 0.0), 2)})
                 trades.append(tr)
                 open_trade = None
@@ -708,7 +716,8 @@ def run_forward_test(candles, cfg, risk_percent=1.0, warmup=45, mode="balanced",
                         tp = entry - atr * tp_mult
                     unit = abs(entry - sl)
                 if unit > 0:
-                    open_trade = {"entry_index": i, "entry_time": candle.get("time"),
+                    open_trade = {"entry_index": i, "entry_time": _bar_close_time(i),
+                                  "entry_at_close": True,
                                   "side": sig, "entry": round(entry, d),
                                   "sl": round(sl, d) if sl is not None else None,
                                   "tp": round(tp, d), "unit": unit, "mae": 0.0}

@@ -44,6 +44,16 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Correzione orari trade su D1 (2026-09-22)
+Problema riportato: "gli orari dei trade non tornano, a quell'ora il prezzo non era a quel valore".
+Causa: su timeframe giornaliero (D1) mostravamo `entry_time`/`exit_time` = timestamp di APERTURA della candela (ora broker es. 21:00/22:00 UTC), ma:
+- l'ENTRATA avviene al CLOSE della candela (~24h dopo l'apertura mostrata);
+- l'USCITA SL/TP viene toccata in un momento qualsiasi INTRADAY, non all'apertura.
+Fix (verificato curl + screenshot):
+- `run_forward_test`: `_bar_close_time(i)` = apertura della candela successiva (= istante reale del close). `entry_time` ora = close time (verificato: segnale 14/07 → entrata 15/07). Flag `entry_at_close` e `intrabar` sui trade.
+- Frontend `ForwardTest.jsx`: su D1 mostra SOLO la data con etichette "·chiusura" (entrata) e "·intraday" (uscita) + nota esplicativa e footer "confronta date/prezzi nel tuo MT5".
+Nota: la finestra "a freddo" dopo un reload backend mostra prezzi simulati per ~20s finché `warm_up` non completa (solo in dev/hot-reload).
+
 ## Prezzi live/candele REALI ovunque (2026-09-22)
 Problema riportato: "i dati non coincidono, e neanche il prezzo attuale".
 Causa: watchlist/ticker, grafico dashboard e analisi AI usavano ancora `generate_candles()` (tutto simulato, base fissa es. 1.0850) — solo forward-test/scoperta erano reali.
