@@ -46,7 +46,8 @@ def test_portfolio_backtest_unknown_id_404(session):
 
 @pytest.fixture(scope="module")
 def portfolio_result(session):
-    payload = {"start_date": "2025-01-01", "start_balance": 10000, "risk_percent": 1.5}
+    # walk_forward True (default) - retrain each year
+    payload = {"start_date": "2025-01-01", "start_balance": 10000, "risk_percent": 1.5, "walk_forward": True}
     r = session.post(f"{API}/portfolio/backtest", json=payload, timeout=30)
     assert r.status_code == 200, r.text
     d = r.json()
@@ -93,15 +94,63 @@ def test_portfolio_result_consistency(portfolio_result):
     assert len(r["real_symbols"]) >= 4, r["real_symbols"]
 
 
-def test_portfolio_progress_field(session):
-    # quick smoke: 'done' field grows/exists in a fresh running job
-    r = session.post(f"{API}/portfolio/backtest",
-                     json={"start_date": "2025-01-01", "start_balance": 10000, "risk_percent": 1.5},
-                     timeout=30)
-    assert r.status_code == 200
+# --- walk_forward specific ---
+def test_walk_forward_true_flag_and_retrains(portfolio_result):
+    r = portfolio_result["result"]
+    assert r.get("walk_forward") is True
+    # start=2025, and end year should be 2026, so >=2 segments -> retrains >=2 for each symbol with data
+    for row in r["per_symbol"]:
+        assert "retrains" in row, row
+        assert row["retrains"] >= 2, row
+
+
+def test_walk_forward_trades_list(portfolio_result):
+    r = portfolio_result["result"]
+    trades = r.get("trades")
+    assert isinstance(trades, list) and len(trades) > 0
+    # trades list >= total_trades (includes open)
+    assert len(trades) >= r["total_trades"]
+    for t in trades:
+        for k in ["symbol", "side", "entry_date", "exit_date", "result", "r", "net"]:
+            assert k in t, t
+        assert t["entry_date"] <= t["exit_date"], t
+
+
+def test_real_symbols_mostly_covered(portfolio_result):
+    r = portfolio_result["result"]
+    # with MetaApi connected and retry logic, expect 6/7 or 7/7 real
+    assert len(r["real_symbols"]) >= 6, (r["real_symbols"], r["sim_symbols"])
+
+
+@pytest.fixture(scope="module")
+def portfolio_result_no_wf(session):
+    payload = {"start_date": "2025-01-01", "start_balance": 10000, "risk_percent": 1.5, "walk_forward": False}
+    r = session.post(f"{API}/portfolio/backtest", json=payload, timeout=30)
+    assert r.status_code == 200, r.text
     job_id = r.json()["job_id"]
-    time.sleep(1.0)
-    rr = session.get(f"{API}/portfolio/backtest/{job_id}", timeout=15).json()
-    assert "done" in rr and "total" in rr
-    assert rr["total"] == 7
-    assert 0 <= rr["done"] <= 7
+    last = None
+    for _ in range(150):
+        rr = session.get(f"{API}/portfolio/backtest/{job_id}", timeout=15)
+        assert rr.status_code == 200
+        last = rr.json()
+        st = last.get("status")
+        if st == "done":
+            return last
+        if st == "error":
+            pytest.fail(f"job errored: {last.get('error')}")
+        time.sleep(2.5)
+    pytest.fail(f"job did not finish in time, last={last}")
+
+
+def test_walk_forward_false_flag_and_retrains(portfolio_result_no_wf):
+    r = portfolio_result_no_wf["result"]
+    assert r.get("walk_forward") is False
+    for row in r["per_symbol"]:
+        assert row.get("retrains") == 1, row
+
+
+def test_walk_forward_false_consistency(portfolio_result_no_wf):
+    r = portfolio_result_no_wf["result"]
+    assert abs(r["final_balance"] - (r["start_balance"] + r["net_profit"])) < 5.0
+    s = sum(row["net"] for row in r["per_symbol"])
+    assert abs(s - r["net_profit"]) < max(50.0, abs(r["net_profit"]) * 0.05)

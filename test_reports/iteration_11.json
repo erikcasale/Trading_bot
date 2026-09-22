@@ -1,0 +1,37 @@
+{
+  "summary": "Tested Walk-Forward Annuale + CSV Export on Portfolio Backtest. Backend walk_forward true/false mechanics work perfectly (retrains>=2 for WF, retrains==1 for non-WF, trades list present with proper shape and entry_date<=exit_date, final_balance/net_profit/per_symbol.net consistency all verified). Frontend: portfolio-panel + walk toggle (checked by default) + run + result + 7-row symbols table + CSV export all working end-to-end. CSV downloads with correct 'apexflow_portfolio_' prefix (633 rows, 20KB, includes summary + per-symbol stats + trades + equity curve). NOTE: MetaApi currently DISCONNECTED at test time (datasource.connected=false, bot.account.real=false), so most symbols were simulated and returns differ from the expected 'connesso' baseline (obtained €47.413 vs expected ~€13.625). The 4 backend test failures are ALL a consequence of the disconnected MetaApi state - not defects in the walk_forward feature itself.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/datasource/status", "issue": "connected=false, connection_status=DISCONNECTED at test time despite request stating account 590b1207 should be connected. Only USD/CAD served from cache as 'real'; other 6 symbols fell back to simulated."},
+      {"endpoint": "/api/bot", "issue": "account.real=false (Tickmill Demo currency=USD balance=175162) - matches disconnected state; not a code bug but blocks tests that assert real=true."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_portfolio.py",
+    "/app/test_reports/pytest/portfolio_wf.xml"
+  ],
+  "action_items": [
+    "MetaApi connection appears dropped: verify RPC session is alive for account 590b1207 (or re-establish) before next full-scale test if 'real symbols' coverage is required. Feature code itself (walk_forward + CSV export) is working correctly and does not need changes."
+  ],
+  "critical_code_review_comments": [
+    "server.py > 1500 lines - consider splitting portfolio/optimize/datasource into separate routers (already flagged in prior iterations).",
+    "_portfolio_compute correctly excludes trades outside the yearly walk-forward segment (entry_time filter) - clean implementation.",
+    "CSV export builds a well-structured multi-section report (summary, per-symbol, trades, equity curve) with proper Italian locale formatting."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_portfolio.py"
+  ],
+  "success_rate": {"backend": "60% (6/10 pass; 4 failures caused by external MetaApi disconnect, NOT feature bugs. Walk_forward feature tests: 6/6 = 100%)", "frontend": "100%"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Walk-Forward + CSV Export features are green. If retesting, ensure MetaApi is connected first (/api/datasource/status connected=true) to validate real_symbols coverage assertion. Do NOT edit backend/server.py during tests (hot-reload wipes _d1_cache and MetaApi RPC state). Backend fixtures currently launch 2 sequential jobs (WF=true then WF=false) - each ~20s when many symbols are simulated, up to ~90s when real; test_real_symbols_mostly_covered requires >=6 real symbols so will fail while MetaApi is down.",
+  "rca of the issue": "MetaApi status observed: connection_status='DISCONNECTED'. Likely causes: (a) RPC session dropped since request was authored, (b) container/hot-reload event since the request. Feature under test (walk_forward + CSV) is independent of connection and passed all functional checks."
+}

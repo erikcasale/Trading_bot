@@ -44,6 +44,14 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
+- **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
+- **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.
+- `_run_portfolio` fa un retry sui simboli caduti a simulato (migliora copertura dati reali).
+- Frontend: toggle `portfolio-walk-toggle` ("Riaddestra ogni anno", default on) e pulsante `portfolio-export-button`.
+- RISULTATO walk-forward su dati reali 7/7: €10.000 → ~€13.625 (+36,3%, +21,1%/anno, DD 19,3%, 215 trade, WR 40,9%).
+- NOTA: l'account MetaApi demo si disconnette a intermittenza (lato broker/MetaApi); quando disconnesso il backtest usa fallback simulato (marcato SIM + warning). Il retry e i badge lo rendono evidente.
+
 ## Backtest di portafoglio multi-strumento (2026-09-22) — iterazione 10 (6/6 backend, frontend 100%)
 Richiesta: "1 gennaio 2025, conto 10k, opera su ciò che vuoi con posizioni multiple, dimmi ad oggi quanti soldi abbiamo".
 - Nuovo account MetaApi configurato: `590b1207-7417-42f2-af73-eacaf7120b41` (TickmillUK-Demo, login 25374738, CONNESSO). Il precedente era andato DISCONNECTED.
