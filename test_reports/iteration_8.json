@@ -1,0 +1,27 @@
+{
+  "summary": "Iteration 8 validated the new cost-inclusive forward-test engine and removal of trap modes/fake backtest. Backend: created /app/backend/tests/test_costs_and_modelock.py (10/10 pytest passed serial). Verified: (a) every trade in /forwardtest/run has 'cost' field > 0 (EUR/USD H1 500 bars → PF=0.65, realized_net<0 as honest expected); (b) legacy modes 'nosl','highwinrate','totally_bogus' all coerced to mode='balanced' with 200 status (no error); (c) params body -> mode='optimized'; (d) /optimize returns full schema cost-adjusted (US30 H1 600 bars, combos_tested>0); (e) /optimize/oos returns verdict+in_sample+out_sample cost-adjusted; (f) watchlist=11; (g) invalid symbol -> 404 on both endpoints. Frontend: demo login OK, dashboard renders forward-test-panel WITHOUT any forwardtest-mode-* toggle and WITHOUT any backtest-* testids (confirmed both are absent via querySelector^=); 'COSTI REALI INCLUSI' green badge visible; forwardtest-run-button replays with forwardtest-trades-table + 'costi reali' explanatory note + period presets (Settimana/Mese/Trimestre/Anno) + replay controls (Riavvia, 1x/3x/6x, Salta alla fine); optimizer-run-button produces optimizer-projected-annual (+49.9%) and optimizer-apply-button; optimizer-oos-button produces oos-result with oos-verdict-badge='FRAGILE (overfitting)' rendering IS/OOS metrics and mini equity curves. Zero console errors/warnings observed. Removed legacy /app/backend/tests/test_forwardtest.py (asserted removed modes highwinrate/nosl).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_costs_and_modelock.py",
+    "/app/test_reports/pytest/iter8_costs.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:712 ForwardTestReq.mode default is still 'highwinrate' — dead field since forwardtest_run hardcodes mode='balanced' at line 727. Consider removing the field from the Pydantic model or defaulting to 'balanced' to reduce API confusion.",
+    "server.py MODE_PRESETS now has only one key ('balanced') — the dict/preset indirection could be simplified to a constant now that trap modes are removed.",
+    "server.py exceeds 700 lines (965). Suggest splitting into routers/services (recurring feedback from iter 7).",
+    "Cost model: cost = spread/unit * risk_amt is a linear approximation that treats spread as fully proportional to position risk — this is fine for a demo but does not include commission-per-lot or slippage as separate components even though the UI note advertises 'spread + commissione + slippage'. Suggest adding a small commission constant per instrument to match the marketing copy."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_costs_and_modelock.py (new)",
+    "/app/backend/tests/test_forwardtest.py (removed – asserted removed modes)"
+  ],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% of tested flows"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Real-costs iteration verified. New test file /app/backend/tests/test_costs_and_modelock.py replaces removed test_forwardtest.py. Older test_optimize.py still has test_forwardtest_with_optimized_params which asserts mode=='optimized' (still valid). All UI testids from the review request are present and functional. FRAGILE OOS verdict on EUR/USD H1 is expected/honest, and PF<1 net-of-costs is expected/honest.",
+  "rca of the issue": "N/A — no bugs found; cost-inclusive engine and trap-mode removal work as designed."
+}

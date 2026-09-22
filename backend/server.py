@@ -709,7 +709,7 @@ class ForwardTestReq(BaseModel):
     timeframe: str = "M15"
     bars: int = 320
     risk_percent: float = 1.0
-    mode: str = "highwinrate"
+    mode: str = "balanced"
     params: Optional[dict] = None
 
 
