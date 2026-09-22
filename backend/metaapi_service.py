@@ -192,13 +192,102 @@ async def fetch_candles(symbol: str, timeframe: str, n: int):
     return None
 
 
+_price_cache = {"ts": 0.0, "data": {}}
+_dref_cache = {"ts": 0.0, "data": {}}
+_refs_lock = asyncio.Lock()
+
+
+async def get_prices(symbols):
+    """Live {app_symbol: {price, bid, ask}} from the broker (or {} if down).
+    Cached 4s so frequent polling doesn't hammer the RPC connection."""
+    now = time.time()
+    if (now - _price_cache["ts"]) < 6 and _price_cache["data"]:
+        return _price_cache["data"]
+    if not await check_connected():
+        return {}
+    try:
+        conn = await _ensure_rpc()
+    except Exception:
+        return {}
+    out = {}
+
+    async def one(app_sym):
+        sym = SYMBOL_MAP.get(app_sym, app_sym.replace("/", ""))
+        try:
+            p = await asyncio.wait_for(conn.get_symbol_price(sym), timeout=3)
+            bid, ask = p.get("bid"), p.get("ask")
+            if bid is None:
+                return
+            out[app_sym] = {"bid": bid, "ask": ask,
+                            "price": round((bid + ask) / 2, 5) if ask else bid}
+        except Exception as e:
+            _state["last_error"] = str(e)[:180]
+
+    await asyncio.gather(*[one(s) for s in symbols])
+    if out:
+        _price_cache.update({"ts": now, "data": out})
+    return out
+
+
+async def get_daily_refs(symbols):
+    """Yesterday's D1 close per symbol (for daily change %). Cached 120s.
+    Fetched in parallel with a short timeout so one slow/failing symbol
+    (e.g. BTCUSD not available) never blocks the whole watchlist."""
+    now = time.time()
+    if (now - _dref_cache["ts"]) < 120 and _dref_cache["data"]:
+        return _dref_cache["data"]
+    async with _refs_lock:
+        # another concurrent caller may have just populated it
+        now = time.time()
+        if (now - _dref_cache["ts"]) < 120 and _dref_cache["data"]:
+            return _dref_cache["data"]
+        if not await check_connected():
+            return {}
+        try:
+            await _ensure_rpc()
+        except Exception:
+            return {}
+        account = _state["account"]
+        refs = {}
+
+        async def one(app_sym):
+            sym = SYMBOL_MAP.get(app_sym, app_sym.replace("/", ""))
+            try:
+                rows = await asyncio.wait_for(
+                    account.get_historical_candles(symbol=sym, timeframe="1d", start_time=None, limit=2),
+                    timeout=8)
+                if rows and len(rows) >= 2:
+                    refs[app_sym] = rows[-2].get("close")
+            except Exception:
+                pass
+
+        await asyncio.gather(*[one(s) for s in symbols])
+        if refs:
+            _dref_cache.update({"ts": now, "data": refs})
+        return refs
+
+
+def cached_daily_refs():
+    """Return the daily-change reference cache without triggering a fetch."""
+    if (time.time() - _dref_cache["ts"]) < 300 and _dref_cache["data"]:
+        return _dref_cache["data"]
+    return {}
+
+
 async def warm_up():
     """Establish the RPC connection ahead of the first user request so cold
-    starts don't silently fall back to simulated data."""
+    starts don't silently fall back to simulated data. Also primes the live
+    price and daily-change caches so the first watchlist load is instant."""
     try:
         if not await check_connected(force=True):
             return False
         await _ensure_rpc()
+        syms = list(SYMBOL_MAP.keys())
+        try:
+            await get_prices(syms)
+            await get_daily_refs(syms)
+        except Exception:
+            pass
         return True
     except Exception as e:
         _state["last_error"] = str(e)[:220]

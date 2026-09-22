@@ -321,25 +321,47 @@ async def seed_positions(uid: str):
 # ---------------------------------------------------------------------------
 @api_router.get("/market/watchlist")
 async def watchlist(user: dict = Depends(get_current_user)):
+    syms = list(INSTRUMENTS.keys())
+    prices = await metaapi_service.get_prices(syms)
+    refs = metaapi_service.cached_daily_refs() if prices else {}
+    if prices and not refs:
+        asyncio.create_task(metaapi_service.get_daily_refs(syms))  # populate for next poll
     out = []
     for sym, cfg in INSTRUMENTS.items():
-        candles, _ = generate_candles(sym, "M15", 40)
-        last = candles[-1]["c"]
-        prev = candles[-20]["c"]
-        change = (last - prev) / prev * 100 if prev else 0
+        real = prices.get(sym)
+        if real:
+            last = round(real["price"], cfg["digits"])
+            ref = refs.get(sym)
+            change = (last - ref) / ref * 100 if ref else 0
+            source = "real"
+        else:
+            candles, _ = generate_candles(sym, "M15", 40)
+            last = candles[-1]["c"]
+            prev = candles[-20]["c"]
+            change = (last - prev) / prev * 100 if prev else 0
+            source = "simulated"
         out.append({"symbol": sym, "category": cfg["cat"], "price": last,
-                    "change": round(change, 2), "digits": cfg["digits"]})
+                    "change": round(change, 2), "digits": cfg["digits"], "source": source})
     return out
+
+
+async def _get_candles(symbol: str, timeframe: str, n: int):
+    """Real broker candles when available, else simulated (with source flag)."""
+    real = await metaapi_service.fetch_candles(symbol, timeframe, n)
+    if real and len(real) >= 30:
+        return real, INSTRUMENTS[symbol], "real"
+    cnds, cfg = generate_candles(symbol, timeframe, n)
+    return cnds, cfg, "simulated"
 
 
 @api_router.get("/market/candles")
 async def candles(symbol: str, timeframe: str = "M15", user: dict = Depends(get_current_user)):
     if symbol not in INSTRUMENTS:
         raise HTTPException(status_code=404, detail="Strumento non trovato")
-    cnds, cfg = generate_candles(symbol, timeframe, 110)
+    cnds, cfg, source = await _get_candles(symbol, timeframe, 110)
     zones = smart_money_zones(cnds, cfg)
     return {"symbol": symbol, "timeframe": timeframe, "digits": cfg["digits"],
-            "price": cnds[-1]["c"], "candles": cnds, "zones": zones}
+            "price": cnds[-1]["c"], "candles": cnds, "zones": zones, "source": source}
 
 # ---------------------------------------------------------------------------
 # AI Smart Money analysis (Claude Sonnet 4.6)
@@ -348,7 +370,7 @@ async def candles(symbol: str, timeframe: str = "M15", user: dict = Depends(get_
 async def ai_analysis(body: AnalysisReq, user: dict = Depends(get_current_user)):
     if body.symbol not in INSTRUMENTS:
         raise HTTPException(status_code=404, detail="Strumento non trovato")
-    cnds, cfg = generate_candles(body.symbol, body.timeframe, 110)
+    cnds, cfg, _src = await _get_candles(body.symbol, body.timeframe, 110)
     zones = smart_money_zones(cnds, cfg)
     d = cfg["digits"]
     price = cnds[-1]["c"]

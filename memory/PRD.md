@@ -44,6 +44,17 @@ Richiesta utente: "Non funziona come strategia se nell'anno ho il PnL negativo �
 - La scoperta richiede profitto nell'ULTIMO ANNO su dati mai visti, ma resta uno studio storico: le performance passate NON garantiscono risultati futuri.
 - +50% annuo = proiezione dimensionata sul rischio, non garantita.
 
+## Prezzi live/candele REALI ovunque (2026-09-22)
+Problema riportato: "i dati non coincidono, e neanche il prezzo attuale".
+Causa: watchlist/ticker, grafico dashboard e analisi AI usavano ancora `generate_candles()` (tutto simulato, base fissa es. 1.0850) — solo forward-test/scoperta erano reali.
+Fix (verificati via curl + screenshot):
+- `metaapi_service.get_prices()`: prezzi live bid/ask via RPC `get_symbol_price` (cache 6s, timeout 3s/simbolo, paralleli). `get_daily_refs()`: chiusura D1 precedente per il change% (parallelo, cache 300s, lock anti-stacking). `cached_daily_refs()` non bloccante.
+- `warm_up()` all'avvio riscalda connessione + cache prezzi/refs → primo caricamento veloce.
+- `/api/market/watchlist`: prezzi reali + change%, con badge `source` per simbolo; non blocca sui refs (li popola in background).
+- `/api/market/candles` e `/api/ai/analysis`: usano `_get_candles()` → candele reali MetaApi (fallback simulato marcato).
+- Steady-state watchlist ~3s/poll. BTC/USDT ed ETH/USDT non esistono su Tickmill demo → restano `simulated` (marcati).
+- Valori reali confermati (22/09/2026): EUR/USD ~1.1458, XAU/USD ~4312, US30 ~52040, NVDA ~227, AAPL ~339.
+
 ## Fix prezzi simulati (2026-09-22)
 Problema riportato: i prezzi dei trade non combaciavano con i dati reali.
 Causa: **fallback silenzioso a dati simulati** su connessione MetaApi "a freddo" (dopo un restart del backend il primo fetch andava in timeout → `generate_candles` con base fissa 1.0850 e timestamp `now()`, prezzi finti).
