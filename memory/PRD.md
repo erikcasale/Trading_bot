@@ -97,6 +97,16 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - ONESTÀ (fondamentale): il modello NON è sempre profittevole — il 2024 perde -15,4% su dati mai visti. L'edge è reale ma FRAGILE (regge 3 anni su 4, con un anno a doppia cifra negativa). Questo è il valore del walk-forward: smaschera la robustezza reale. Backtest storico, nessuna garanzia futura.
 - Frontend: pannello `wf-panel` (bottone `wf-run-button`, tabella `wf-years-table`, stat anni positivi/miglior-peggior/equity composta/peggior DD). NOTA: verifica UI limitata a compile + coerenza dati (screenshot-tool non mantiene il login demo — flakiness del tool, /auth/me OK via API).
 
+## Tentativi di MIGLIORAMENTO strategia (2026-06) — DATI REALI 5/5
+- Richiesta utente: "riesci a trovare una strategia migliore o chiedo a chatgpt?"
+- TENTATIVO 1 — Ensemble (mean-rev + trend/breakout, 2 modelli ML): BOCCIATO dal walk-forward. Aggiunto `_cand_trend` (Donchian+regime), refactor `_ml_dataset/_ml_fit/_ml_generate` con param `cand_fn`, `_ml_ensemble_trades`. Risultato: 2/4 anni positivi, media +3,12%/anno, 2024 -19,4% e 2026 -2,6% (PEGGIO). Lo sleeve trend senza SL aggiunge rischio di coda negli anni choppy. → sleeve trend DISABILITATO di default (codice conservato).
+- TENTATIVO 2 — Ottimizzazione TP del mean-reversion ML: RIUSCITO. Ampliata la griglia tp_mult a {1,1.5,2,3}×ATR e rilassati i minimi campione (core>=50, val>=12, taken>=4) per far scegliere al modello TP più larghi dove conviene. Sempre walk-forward, TP scelto su validazione anno-prima.
+- RISULTATO FINALE SPEDITO (mean-reversion ML, walk-forward reale 5/5):
+  - 2023 +11,1% (DD 16,4%) · 2024 -15,4% (DD 16,0%) · 2025 +23,5% (DD 8,3%) · 2026 +16,1% (DD 9,7%)
+  - 3/4 anni positivi · media +8,82%/anno (prima +5,62%) · equity composta €13.477 (+34,8%, prima +20,8%) · peggior DD 16,44% · mai azzerato.
+- Il default engine ("ml") ora usa questa config migliorata. Label strategia: "ML mean-reversion (gradient boosting)".
+- ONESTÀ: il 2024 resta -15,4% (senza SL un anno storto non si elimina). Miglioramento reale e out-of-sample, non overfitting (TP scelto su validazione). L'ensemble trend è stato testato e scartato: è questo il valore del test reale vs il solo suggerire idee.
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.

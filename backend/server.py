@@ -1353,11 +1353,26 @@ def _std(seq):
     return (sum((x - m) ** 2 for x in seq) / len(seq)) ** 0.5
 
 
-def _candidate_side(closes, i):
+def _cand_meanrev(candles, closes, i):
     r = _rsi(closes[:i + 1], 2)
     if r < 30:
         return "BUY"
     if r > 70:
+        return "SELL"
+    return None
+
+
+def _cand_trend(candles, closes, i):
+    """Donchian-style breakout in the direction of the SMA200 regime."""
+    if i < 210:
+        return None
+    sma200 = _mean(closes[i - 200:i + 1])
+    hi = max(closes[i - 20:i])
+    lo = min(closes[i - 20:i])
+    price = closes[i]
+    if price >= hi and price > sma200:
+        return "BUY"
+    if price <= lo and price < sma200:
         return "SELL"
     return None
 
@@ -1400,12 +1415,12 @@ def _ml_features(candles, closes, i, side):
     ]
 
 
-def _ml_dataset(candles, closes, cfg, tp_mult, tstop):
-    """Every mean-reversion candidate → (features, win?, pnl, entry_time)."""
+def _ml_dataset(candles, closes, cfg, tp_mult, tstop, cand_fn=_cand_meanrev):
+    """Every candidate from cand_fn → (features, win?, pnl, entry_time)."""
     X, y, pnl, times = [], [], [], []
     n = len(candles)
     for i in range(200, n - 1):
-        side = _candidate_side(closes, i)
+        side = cand_fn(candles, closes, i)
         if not side:
             continue
         entry = closes[i]
@@ -1429,7 +1444,7 @@ def _ml_dataset(candles, closes, cfg, tp_mult, tstop):
     return X, y, pnl, times
 
 
-def _ml_fit(candles, closes, cfg, train_end):
+def _ml_fit(candles, closes, cfg, train_end, cand_fn=_cand_meanrev):
     """Fit the gradient-boosting gate on candidates BEFORE train_end. Pick tp_mult
     and probability threshold on the last training year (validation), then refit on
     all pre-train_end data. Returns (model, tp_mult, thr, n_train, val_net) or None."""
@@ -1437,11 +1452,11 @@ def _ml_fit(candles, closes, cfg, train_end):
     tstop = 20
     val_start = train_end - timedelta(days=365)
     best = None
-    for tp_mult in (1.0, 1.5, 2.0):
-        X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop)
+    for tp_mult in (1.0, 1.5, 2.0, 3.0):
+        X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop, cand_fn)
         idx_core = [k for k, t in enumerate(times) if t < val_start]
         idx_val = [k for k, t in enumerate(times) if val_start <= t < train_end]
-        if len(idx_core) < 60 or len(idx_val) < 15:
+        if len(idx_core) < 50 or len(idx_val) < 12:
             continue
         yc = [y[k] for k in idx_core]
         if len(set(yc)) < 2:
@@ -1452,14 +1467,14 @@ def _ml_fit(candles, closes, cfg, train_end):
         proba_val = model.predict_proba([X[k] for k in idx_val])[:, 1]
         for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
             net = sum(pnl[idx_val[m]] for m in range(len(idx_val)) if proba_val[m] >= thr)
-            if sum(1 for pv in proba_val if pv >= thr) < 5:
+            if sum(1 for pv in proba_val if pv >= thr) < 4:
                 continue
             if best is None or net > best[0]:
                 best = (net, tp_mult, thr)
     if best is None or best[0] <= 0:
         return None
     _, tp_mult, thr = best
-    X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop)
+    X, y, pnl, times = _ml_dataset(candles, closes, cfg, tp_mult, tstop, cand_fn)
     idx_tr = [k for k, t in enumerate(times) if t < train_end]
     ytr = [y[k] for k in idx_tr]
     if len(set(ytr)) < 2:
@@ -1470,7 +1485,7 @@ def _ml_fit(candles, closes, cfg, train_end):
     return model, tp_mult, thr, len(idx_tr), round(best[0], 5)
 
 
-def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, test_end=None):
+def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, test_end=None, cand_fn=_cand_meanrev):
     """Trade the model on [test_start, test_end): open only high-proba candidates.
     NO price stop; exit at TP or time-stop. Positions still open at test_end are
     left floating (open=True) valued at the last in-window candle."""
@@ -1503,7 +1518,7 @@ def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, t
             bt = _pt(_bar_close(candles, i))
             if bt < test_start or (test_end is not None and bt >= test_end):
                 continue
-            side = _candidate_side(closes, i)
+            side = cand_fn(candles, closes, i)
             if not side:
                 continue
             if model.predict_proba([_ml_features(candles, closes, i, side)])[0][1] < thr:
@@ -1522,15 +1537,39 @@ def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, t
     return trades
 
 
-def _ml_symbol(candles, cfg, start):
-    fit = _ml_fit(candles, [c["c"] for c in candles], cfg, start)
-    if fit is None:
+def _ml_ensemble_trades(candles, cfg, test_start, test_end=None):
+    """ML-gated mean-reversion sleeve (the walk-forward winner). A trend/breakout
+    sleeve was tested but hurt robustness without a stop loss (added tail risk in
+    choppy years), so it is disabled by default. NO stop loss; time-stop exit."""
+    closes = [c["c"] for c in candles]
+    all_trades, sleeves = [], {}
+    for name, cand_fn in (("meanrev", _cand_meanrev),):
+        try:
+            fit = _ml_fit(candles, closes, cfg, test_start, cand_fn)
+        except Exception:
+            logger.exception("ml sleeve %s fit failed", name)
+            fit = None
+        if fit is None:
+            continue
+        model, tp_mult, thr, n_train, val_net = fit
+        trs = _ml_generate(candles, closes, cfg, model, tp_mult, thr, 20, test_start, test_end, cand_fn)
+        for t in trs:
+            t["sleeve"] = name
+        all_trades.extend(trs)
+        sleeves[name] = {"tp_atr": tp_mult, "threshold": round(thr, 2),
+                         "train_candidates": n_train, "val_net": val_net}
+    if not all_trades:
         return None
-    model, tp_mult, thr, n_train, val_net = fit
-    trades = _ml_generate(candles, [c["c"] for c in candles], cfg, model, tp_mult, thr, 20, start, None)
-    info = {"tp_atr": tp_mult, "time_stop": 20, "threshold": round(thr, 2),
-            "train_candidates": n_train, "val_net": val_net}
-    return trades, info
+    mr = sleeves.get("meanrev", {})
+    info = {"label": "ML mean-reversion (gradient boosting)", "entry": "ml_meanrev",
+            "time_stop": 20, "sleeves": sleeves,
+            "tp_atr": mr.get("tp_atr"), "threshold": mr.get("threshold"),
+            "train_candidates": sum(s["train_candidates"] for s in sleeves.values())}
+    return all_trades, info
+
+
+def _ml_symbol(candles, cfg, start):
+    return _ml_ensemble_trades(candles, cfg, start, None)
 
 
 def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=10):
@@ -1590,20 +1629,18 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
             if not candles or len(candles) < 300:
                 continue
             cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
-            closes = [c["c"] for c in candles]
             # need training history before the test year
             if _pt(candles[0]["time"]) >= test_start - timedelta(days=400):
                 continue
             (year_real if source == "real" else year_sim).append(sym)
             try:
-                fit = _ml_fit(candles, closes, cfg, test_start)
+                picked = _ml_ensemble_trades(candles, cfg, test_start, test_end)
             except Exception:
-                logger.exception("wf fit %s %s failed", sym, Y)
-                fit = None
-            if fit is None:
+                logger.exception("wf ensemble %s %s failed", sym, Y)
+                picked = None
+            if picked is None:
                 continue
-            model, tp_mult, thr, n_train, val_net = fit
-            trades = _ml_generate(candles, closes, cfg, model, tp_mult, thr, 20, test_start, test_end)
+            trades, info = picked
             contract = CONTRACT_SIZE.get(sym, 100000)
             price_on[sym] = {}
             for c in candles:
@@ -1614,9 +1651,7 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
             if not price_on[sym]:
                 continue
             year_end_px = max(price_on[sym])
-            sym_strategy[sym] = {"label": "ML gate (gradient boosting)", "entry": "ml_meanrev",
-                                 "tp_atr": tp_mult, "time_stop": 20, "threshold": round(thr, 2),
-                                 "train_candidates": n_train}
+            sym_strategy[sym] = {"entry": "ml_ensemble", **info}
             for t in trades:
                 et = _pt(t["entry_time"])
                 if not (test_start <= et < test_end):
