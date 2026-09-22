@@ -82,6 +82,9 @@ async def get_current_user(request: Request) -> dict:
 INSTRUMENTS = {
     "EUR/USD":  {"cat": "forex",  "base": 1.0850,  "vol": 0.0009, "digits": 5},
     "GBP/USD":  {"cat": "forex",  "base": 1.2720,  "vol": 0.0011, "digits": 5},
+    "USD/CHF":  {"cat": "forex",  "base": 0.9050,  "vol": 0.0009, "digits": 5},
+    "USD/CAD":  {"cat": "forex",  "base": 1.3620,  "vol": 0.0011, "digits": 5},
+    "AUD/USD":  {"cat": "forex",  "base": 0.6650,  "vol": 0.0008, "digits": 5},
     "XAU/USD":  {"cat": "forex",  "base": 2340.0,  "vol": 6.5,    "digits": 2},
     "BTC/USDT": {"cat": "crypto", "base": 67500.0, "vol": 480.0,  "digits": 1},
     "ETH/USDT": {"cat": "crypto", "base": 3450.0,  "vol": 34.0,   "digits": 2},

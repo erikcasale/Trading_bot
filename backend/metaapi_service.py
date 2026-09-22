@@ -17,6 +17,7 @@ TF_MAP = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
           "H1": "1h", "H4": "4h", "D1": "1d"}
 SYMBOL_MAP = {
     "EUR/USD": "EURUSD", "GBP/USD": "GBPUSD", "XAU/USD": "XAUUSD",
+    "USD/CHF": "USDCHF", "USD/CAD": "USDCAD", "AUD/USD": "AUDUSD",
     "BTC/USDT": "BTCUSD", "ETH/USDT": "ETHUSD",
     "NVDA": "NVDA", "AAPL": "AAPL", "US30": "US30",
 }
@@ -113,37 +114,44 @@ async def _ensure_rpc():
 
 
 async def fetch_candles(symbol: str, timeframe: str, n: int):
-    """Return list of {time,o,h,l,c,v} from the broker, or None if unavailable."""
+    """Return list of {time,o,h,l,c,v} from the broker, or None if unavailable.
+    Retries once with a fresh RPC connection on timeout/error (the first RPC
+    historical call after a re-sync is occasionally slow)."""
     if not await check_connected():
         return None
-    try:
-        sym = SYMBOL_MAP.get(symbol, symbol.replace("/", ""))
-        tf = TF_MAP.get(timeframe, "15m")
-        account = _state["account"]
-        if account is None:
-            await _ensure_rpc()
+    sym = SYMBOL_MAP.get(symbol, symbol.replace("/", ""))
+    tf = TF_MAP.get(timeframe, "15m")
+    for attempt in range(2):
+        try:
             account = _state["account"]
-        rows = await asyncio.wait_for(
-            account.get_historical_candles(symbol=sym, timeframe=tf, start_time=None, limit=min(n, 1000)),
-            timeout=30,
-        )
-        if not rows:
-            return None
-        out = []
-        for r in rows:
-            t = r.get("time")
-            out.append({
-                "time": t.isoformat() if hasattr(t, "isoformat") else str(t),
-                "o": r.get("open"), "h": r.get("high"),
-                "l": r.get("low"), "c": r.get("close"),
-                "v": r.get("tickVolume", r.get("volume", 0)),
-            })
-        out.sort(key=lambda x: x["time"])
-        return out
-    except Exception as e:
-        _state["last_error"] = str(e)[:220]
-        logger.warning(f"MetaApi fetch_candles failed: {e}")
-        return None
+            if account is None:
+                await _ensure_rpc()
+                account = _state["account"]
+            rows = await asyncio.wait_for(
+                account.get_historical_candles(symbol=sym, timeframe=tf, start_time=None, limit=min(n, 1000)),
+                timeout=45,
+            )
+            if not rows:
+                if attempt == 0:
+                    _state["connection"] = None  # force reconnect and retry
+                    continue
+                return None
+            out = []
+            for r in rows:
+                t = r.get("time")
+                out.append({
+                    "time": t.isoformat() if hasattr(t, "isoformat") else str(t),
+                    "o": r.get("open"), "h": r.get("high"),
+                    "l": r.get("low"), "c": r.get("close"),
+                    "v": r.get("tickVolume", r.get("volume", 0)),
+                })
+            out.sort(key=lambda x: x["time"])
+            return out
+        except Exception as e:
+            _state["last_error"] = str(e)[:220]
+            logger.warning(f"MetaApi fetch_candles attempt {attempt} failed: {e}")
+            _state["connection"] = None  # drop stale connection before retry
+    return None
 
 
 async def place_market_order(symbol: str, side: str, volume: float, sl=None, tp=None):
