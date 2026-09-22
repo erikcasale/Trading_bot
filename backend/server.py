@@ -938,6 +938,7 @@ class PortfolioReq(BaseModel):
     start_date: str = "2025-01-01"
     start_balance: float = 10000.0
     risk_percent: float = 1.5
+    walk_forward: bool = True
 
 
 PORTFOLIO_SYMBOLS = ["EUR/USD", "GBP/USD", "USD/CHF", "USD/CAD", "AUD/USD", "XAU/USD", "US30"]
@@ -978,8 +979,13 @@ async def _run_portfolio(job_id, body):
             candles, source = await _get_d1_history(sym, want)
             data[sym] = (candles, source)
             job["done"] += 1
+        # retry any symbol that fell back to simulated (transient fetch failures)
+        for sym in [s for s, (_, src) in data.items() if src != "real"]:
+            candles, source = await _get_d1_history(sym, want)
+            if source == "real":
+                data[sym] = (candles, source)
         result = await asyncio.to_thread(_portfolio_compute, data, body.start_date,
-                                         body.start_balance, body.risk_percent)
+                                         body.start_balance, body.risk_percent, body.walk_forward)
         if result is None:
             _portfolio_jobs[job_id] = {"status": "error", "result": None,
                                        "error": "Storico insufficiente"}
@@ -990,7 +996,33 @@ async def _run_portfolio(job_id, body):
         _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
 
 
-def _portfolio_compute(data, start_date, start_balance, risk_pct):
+def _pick_params(train, cfg):
+    """Best params on a training slice (reduced grid, no look-ahead)."""
+    train_days = _period_days(train, "D1")
+    best = None
+    for entry in ("smc", "meanrev", "breakout", "trend"):
+        for tp in (1.5, 2.0, 3.0):
+            for sl in (1.0, 1.5):
+                for tfil in (True, False):
+                    for rsi in (True, False):
+                        params = {"entry": entry, "tp_mult": tp, "sl_mult": sl,
+                                  "trend_filter": tfil, "rsi": rsi}
+                        r = run_forward_test(train, cfg, 1.0, params=params)
+                        if r["total_trades"] < 8:
+                            continue
+                        ann = r["realized_net"] / r["start_equity"] * 100 * (365.0 / max(train_days, 1))
+                        dd = max(r["max_drawdown"], 0.1)
+                        score = (ann / dd) if (r["profit_factor"] >= 1.05 and ann > 0) else (-1e6 + ann)
+                        if best is None or score > best[0]:
+                            best = (score, params)
+    return best[1] if best else None
+
+
+ENTRY_LABELS = {"smc": "Smart Money", "meanrev": "Mean-Reversion",
+                "breakout": "Breakout", "trend": "Trend-Following"}
+
+
+def _portfolio_compute(data, start_date, start_balance, risk_pct, walk_forward=True):
     try:
         start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
     except Exception:
@@ -1007,52 +1039,44 @@ def _portfolio_compute(data, start_date, start_balance, risk_pct):
             continue
         (real_syms if source == "real" else sim_syms).append(sym)
         cfg = INSTRUMENTS[sym]
-        idx = next((i for i, c in enumerate(candles) if pt(c["time"]) >= start), None)
-        if idx is None or idx < 120 or (len(candles) - idx) < 20:
-            continue
-        train = candles[:idx]
-        # pick the best params on PRE-start data only (no look-ahead).
-        # reduced grid keeps the multi-instrument compute snappy.
-        train_days = _period_days(train, "D1")
-        best = None
-        for entry in ("smc", "meanrev", "breakout", "trend"):
-            for tp in (1.5, 2.0, 3.0):
-                for sl in (1.0, 1.5):
-                    for tfil in (True, False):
-                        for rsi in (True, False):
-                            params = {"entry": entry, "tp_mult": tp, "sl_mult": sl,
-                                      "trend_filter": tfil, "rsi": rsi}
-                            r = run_forward_test(train, cfg, 1.0, params=params)
-                            if r["total_trades"] < 8:
-                                continue
-                            ann = r["realized_net"] / r["start_equity"] * 100 * (365.0 / max(train_days, 1))
-                            dd = max(r["max_drawdown"], 0.1)
-                            score = (ann / dd) if (r["profit_factor"] >= 1.05 and ann > 0) else (-1e6 + ann)
-                            if best is None or score > best[0]:
-                                best = (score, params)
-        if best is None:
-            continue
-        params = best[1]
-        full = run_forward_test(candles, cfg, 1.0, params=params)
-        sym_trades = []
-        for t in full["trades"]:
-            try:
-                et = pt(t["entry_time"])
-            except Exception:
+        end_year = pt(candles[-1]["time"]).year
+        # walk-forward: retrain before EACH year; else one pre-start training
+        if walk_forward:
+            segments = [(max(start, datetime(y, 1, 1, tzinfo=timezone.utc)),
+                         datetime(y + 1, 1, 1, tzinfo=timezone.utc))
+                        for y in range(start.year, end_year + 1)]
+        else:
+            segments = [(start, pt(candles[-1]["time"]) + timedelta(days=1))]
+        sym_trades, labels, retrains = [], [], 0
+        for seg_start, seg_end in segments:
+            train = [c for c in candles if pt(c["time"]) < seg_start]
+            if len(train) < 120:
                 continue
-            if et < start:
+            params = _pick_params(train, cfg)
+            if params is None:
                 continue
-            xt = pt(t["exit_time"]) if t.get("exit_time") else pt(candles[-1]["time"])
-            last_end = max(last_end, xt)
-            r_mult = t["pnl"] / 100.0  # pnl is at fixed 1% (=100) risk -> R multiple
-            trade = {"symbol": sym, "entry": et, "exit": xt, "r": r_mult,
-                     "result": t["result"], "side": t["side"]}
-            all_trades.append(trade)
-            sym_trades.append(trade)
-        per_symbol.append({"symbol": sym, "params": params, "entry_label":
-                           {"smc": "Smart Money", "meanrev": "Mean-Reversion", "breakout": "Breakout",
-                            "trend": "Trend-Following"}[params["entry"]],
-                           "trades": len(sym_trades)})
+            retrains += 1
+            labels.append(ENTRY_LABELS[params["entry"]])
+            full = run_forward_test(candles, cfg, 1.0, params=params)
+            for t in full["trades"]:
+                try:
+                    et = pt(t["entry_time"])
+                except Exception:
+                    continue
+                if not (seg_start <= et < seg_end):
+                    continue
+                xt = pt(t["exit_time"]) if t.get("exit_time") else pt(candles[-1]["time"])
+                last_end = max(last_end, xt)
+                trade = {"symbol": sym, "entry": et, "exit": xt, "r": t["pnl"] / 100.0,
+                         "result": t["result"], "side": t["side"]}
+                all_trades.append(trade)
+                sym_trades.append(trade)
+        if not labels:
+            continue
+        uniq = list(dict.fromkeys(labels))
+        label = uniq[0] if len(uniq) == 1 else "Misto (walk-forward)"
+        per_symbol.append({"symbol": sym, "entry_label": label,
+                           "trades": len(sym_trades), "retrains": retrains})
 
     if not all_trades:
         return None
@@ -1072,6 +1096,7 @@ def _portfolio_compute(data, start_date, start_balance, risk_pct):
             t["risk_amt"] = equity * risk_pct / 100.0
         else:
             pnl = t["risk_amt"] * t["r"]
+            t["net"] = round(pnl, 2)
             equity += pnl
             sym_pnl[t["symbol"]] = round(sym_pnl.get(t["symbol"], 0) + pnl, 2)
             peak = max(peak, equity)
@@ -1087,6 +1112,13 @@ def _portfolio_compute(data, start_date, start_balance, risk_pct):
     per_symbol.sort(key=lambda x: -x.get("net", 0))
     days = max((last_end - start).days, 1)
     net = round(equity - start_balance, 2)
+    trade_rows = sorted(all_trades, key=lambda t: t["entry"])
+    trades_out = [{
+        "symbol": t["symbol"], "side": t["side"],
+        "entry_date": t["entry"].date().isoformat(),
+        "exit_date": t["exit"].date().isoformat(),
+        "result": t["result"], "r": round(t["r"], 2), "net": t.get("net", 0),
+    } for t in trade_rows]
     return {
         "start_date": start.date().isoformat(), "end_date": last_end.date().isoformat(),
         "days": days, "start_balance": round(start_balance, 2),
@@ -1094,11 +1126,13 @@ def _portfolio_compute(data, start_date, start_balance, risk_pct):
         "return_percent": round(net / start_balance * 100, 1),
         "annualized_percent": round(net / start_balance * 100 * (365.0 / days), 1),
         "max_drawdown": round(max_dd, 2), "risk_percent": risk_pct,
+        "walk_forward": walk_forward,
         "total_trades": total, "wins": wins, "losses": total - wins,
         "winrate": round(wins / total * 100, 1) if total else 0,
         "open_trades": open_n, "per_symbol": per_symbol,
         "real_symbols": real_syms, "sim_symbols": sim_syms,
         "equity_curve": [c["e"] for c in curve],
+        "trades": trades_out,
     }
 
 

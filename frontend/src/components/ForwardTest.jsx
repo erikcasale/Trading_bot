@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { LineChart, Line, YAxis, ResponsiveContainer, Tooltip } from "recharts";
-import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target, Brain, CheckCircle2, XCircle, Clock, Copy } from "lucide-react";
+import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target, Brain, CheckCircle2, XCircle, Clock, Copy, Download } from "lucide-react";
 
 const PERIODS = [
   ["Settimana", "M15", 480],
@@ -39,6 +39,7 @@ export default function ForwardTest({ symbol }) {
   const [intradayAll, setIntradayAll] = useState({ loading: false, done: 0, total: 0 });
   const [pf, setPf] = useState(null);
   const [pfState, setPfState] = useState({ loading: false, done: 0, total: 7 });
+  const [pfWalk, setPfWalk] = useState(true);
   const pfPoll = useRef(null);
   const intradayPoll = useRef(null);
   const discPoll = useRef(null);
@@ -56,7 +57,7 @@ export default function ForwardTest({ symbol }) {
     if (pfPoll.current) clearInterval(pfPoll.current);
     setPf(null); setPfState({ loading: true, done: 0, total: 7 });
     try {
-      const { data } = await api.post("/portfolio/backtest", { start_date: "2025-01-01", start_balance: 10000, risk_percent: 1.5 });
+      const { data } = await api.post("/portfolio/backtest", { start_date: "2025-01-01", start_balance: 10000, risk_percent: 1.5, walk_forward: pfWalk });
       const jobId = data.job_id;
       let ticks = 0;
       pfPoll.current = setInterval(async () => {
@@ -74,6 +75,38 @@ export default function ForwardTest({ symbol }) {
         } catch { /* keep polling */ }
       }, 4000);
     } catch { setPfState({ loading: false, done: 0, total: 7 }); toast.error("Impossibile avviare il backtest"); }
+  };
+
+  const exportPortfolioCsv = () => {
+    if (!pf) return;
+    const L = [];
+    L.push("Apex Flow - Backtest Portafoglio");
+    L.push(`Periodo,${pf.start_date},${pf.end_date},${pf.days} giorni`);
+    L.push(`Saldo iniziale,${pf.start_balance}`);
+    L.push(`Saldo finale,${pf.final_balance}`);
+    L.push(`Net,${pf.net_profit}`);
+    L.push(`Rendimento %,${pf.return_percent}`);
+    L.push(`Annualizzato %,${pf.annualized_percent}`);
+    L.push(`Max Drawdown %,${pf.max_drawdown}`);
+    L.push(`Trade,${pf.total_trades}`);
+    L.push(`Win rate %,${pf.winrate}`);
+    L.push(`Rischio per trade %,${pf.risk_percent}`);
+    L.push(`Walk-forward annuale,${pf.walk_forward ? "si" : "no"}`);
+    L.push("");
+    L.push("Strumento,Strategia,Trade,Riaddestramenti,Net EUR");
+    pf.per_symbol.forEach((s) => L.push(`${s.symbol},${s.entry_label},${s.trades},${s.retrains || 1},${s.net}`));
+    L.push("");
+    L.push("Data ingresso,Data uscita,Strumento,Lato,Esito,R,Net EUR");
+    (pf.trades || []).forEach((t) => L.push(`${t.entry_date},${t.exit_date},${t.symbol},${t.side},${t.result},${t.r},${t.net}`));
+    L.push("");
+    L.push("Equity curve (indice,equity EUR)");
+    (pf.equity_curve || []).forEach((e, i) => L.push(`${i},${e}`));
+    const blob = new Blob([L.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `apexflow_portfolio_${pf.start_date}_${pf.end_date}.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    toast.success("Report CSV scaricato");
   };
 
   const isDaily = res && (res.timeframe === "D1" || res.timeframe === "D");
@@ -329,11 +362,18 @@ export default function ForwardTest({ symbol }) {
             <span className="font-head font-bold text-sm">Backtest Portafoglio</span>
             <span className="overline">€10k · dal 1 gen 2025 · 7 strumenti · posizioni multiple</span>
           </div>
-          <button data-testid="portfolio-run-button" onClick={runPortfolio} disabled={pfState.loading}
-            className="inline-flex items-center gap-1.5 bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
-            {pfState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Layers className="w-3.5 h-3.5" />}
-            {pfState.loading ? `Scarico dati ${pfState.done}/${pfState.total}…` : "Avvia backtest portafoglio"}
-          </button>
+          <div className="flex items-center gap-2">
+            <label data-testid="portfolio-walk-toggle" className="flex items-center gap-1 text-[10px] text-[#94A3B8] cursor-pointer select-none">
+              <input type="checkbox" checked={pfWalk} onChange={(e) => setPfWalk(e.target.checked)} disabled={pfState.loading}
+                className="accent-[#8B5CF6] w-3 h-3" />
+              Riaddestra ogni anno
+            </label>
+            <button data-testid="portfolio-run-button" onClick={runPortfolio} disabled={pfState.loading}
+              className="inline-flex items-center gap-1.5 bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+              {pfState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Layers className="w-3.5 h-3.5" />}
+              {pfState.loading ? `Scarico dati ${pfState.done}/${pfState.total}…` : "Avvia backtest portafoglio"}
+            </button>
+          </div>
         </div>
         <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
           Parte da <b className="text-white">€10.000</b> il <b className="text-white">1 gennaio 2025</b> e opera fino a oggi su 7 strumenti con conto condiviso e posizioni multiple.
@@ -355,8 +395,12 @@ export default function ForwardTest({ symbol }) {
               <BigStat label="Max Drawdown" value={`${pf.max_drawdown}%`} color="#F59E0B" />
               <BigStat label="Trade · WR" value={`${pf.total_trades}`} sub={`${pf.winrate}% win · ${pf.open_trades} aperti`} color="#0EA5E9" />
             </div>
-            <div className="text-[11px] font-mono text-[#64748B]">
-              {pf.start_date} → {pf.end_date} · {pf.days} giorni · capitale iniziale €{pf.start_balance.toLocaleString("it-IT")} · rischio {pf.risk_percent}%/trade
+            <div className="text-[11px] font-mono text-[#64748B] flex flex-wrap items-center justify-between gap-2">
+              <span>{pf.start_date} → {pf.end_date} · {pf.days} giorni · capitale iniziale €{pf.start_balance.toLocaleString("it-IT")} · rischio {pf.risk_percent}%/trade · {pf.walk_forward ? "walk-forward annuale" : "training unico pre-2025"}</span>
+              <button data-testid="portfolio-export-button" onClick={exportPortfolioCsv}
+                className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md border border-[#10B981]/40 text-[#10B981] hover:bg-[#10B981]/10 transition-colors">
+                <Download className="w-3 h-3" />Esporta report CSV
+              </button>
             </div>
             <ResponsiveContainer width="100%" height={110}>
               <LineChart data={pf.equity_curve.map((e, i) => ({ i, e }))}>
