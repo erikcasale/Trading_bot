@@ -88,3 +88,9 @@ frontend/node_modules/.cache/default-development/0.pack
 
 # VPS deploy secrets
 deploy/.env
+.env
+.env.*
+*.env
+credentials.json
+*.key
+.credentials
