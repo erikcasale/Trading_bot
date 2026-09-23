@@ -87,6 +87,16 @@ INSTRUMENTS = {
     "USD/CHF":  {"cat": "forex",  "base": 0.9050,  "vol": 0.0009, "digits": 5, "spread": 0.00012},
     "USD/CAD":  {"cat": "forex",  "base": 1.3620,  "vol": 0.0011, "digits": 5, "spread": 0.00013},
     "AUD/USD":  {"cat": "forex",  "base": 0.6650,  "vol": 0.0008, "digits": 5, "spread": 0.00011},
+    "EUR/GBP":  {"cat": "forex",  "base": 0.8530,  "vol": 0.0007, "digits": 5, "spread": 0.00012},
+    "EUR/AUD":  {"cat": "forex",  "base": 1.6300,  "vol": 0.0016, "digits": 5, "spread": 0.00020},
+    "EUR/CHF":  {"cat": "forex",  "base": 0.9600,  "vol": 0.0008, "digits": 5, "spread": 0.00013},
+    "EUR/CAD":  {"cat": "forex",  "base": 1.4700,  "vol": 0.0013, "digits": 5, "spread": 0.00016},
+    "GBP/AUD":  {"cat": "forex",  "base": 1.9100,  "vol": 0.0018, "digits": 5, "spread": 0.00025},
+    "GBP/CHF":  {"cat": "forex",  "base": 1.1250,  "vol": 0.0011, "digits": 5, "spread": 0.00018},
+    "GBP/CAD":  {"cat": "forex",  "base": 1.7300,  "vol": 0.0015, "digits": 5, "spread": 0.00020},
+    "AUD/CAD":  {"cat": "forex",  "base": 0.9050,  "vol": 0.0009, "digits": 5, "spread": 0.00014},
+    "AUD/CHF":  {"cat": "forex",  "base": 0.5700,  "vol": 0.0008, "digits": 5, "spread": 0.00014},
+    "CAD/CHF":  {"cat": "forex",  "base": 0.6600,  "vol": 0.0007, "digits": 5, "spread": 0.00014},
     "XAU/USD":  {"cat": "forex",  "base": 2340.0,  "vol": 6.5,    "digits": 2, "spread": 0.35},
     "BTC/USDT": {"cat": "crypto", "base": 67500.0, "vol": 480.0,  "digits": 1, "spread": 22.0},
     "ETH/USDT": {"cat": "crypto", "base": 3450.0,  "vol": 34.0,   "digits": 2, "spread": 2.2},
@@ -935,7 +945,10 @@ async def _run_intraday_all(job_id, symbol, trades):
 
 
 CONTRACT_SIZE = {"EUR/USD": 100000, "GBP/USD": 100000, "USD/CHF": 100000,
-                 "USD/CAD": 100000, "AUD/USD": 100000, "XAU/USD": 100, "US30": 1}
+                 "USD/CAD": 100000, "AUD/USD": 100000, "XAU/USD": 100, "US30": 1,
+                 "EUR/GBP": 100000, "EUR/AUD": 100000, "EUR/CHF": 100000, "EUR/CAD": 100000,
+                 "GBP/AUD": 100000, "GBP/CHF": 100000, "GBP/CAD": 100000,
+                 "AUD/CAD": 100000, "AUD/CHF": 100000, "CAD/CHF": 100000}
 
 
 class NoslReq(BaseModel):
@@ -996,6 +1009,7 @@ class MlWalkForwardReq(BaseModel):
     max_concurrent: int = 10
     timeframe: str = "D1"       # "D1" | "H4"
     cross_pair: bool = False    # add dollar-strength + relative-value features
+    strength: bool = False      # trade currency-strength divergence on an expanded cross universe
 
 
 @api_router.post("/portfolio/ml_walkforward")
@@ -1023,7 +1037,9 @@ async def _run_ml_wf(job_id, body):
             tstop, min_bars = 20, 300
             xwin = (20, 60, 60)
         data = {}
-        for sym in FOREX_SYMBOLS:
+        universe = STRENGTH_SYMBOLS if body.strength else FOREX_SYMBOLS
+        _portfolio_jobs[job_id]["total"] = len(universe)
+        for sym in universe:
             candles, source = await fetch(sym, want)
             data[sym] = (candles, source)
             _portfolio_jobs[job_id]["done"] += 1
@@ -1031,19 +1047,32 @@ async def _run_ml_wf(job_id, body):
             candles, source = await fetch(sym, want)
             if source == "real":
                 data[sym] = (candles, source)
+        if body.strength:
+            # honesty: currency-strength must use ONLY real data — drop any pair that
+            # fell back to simulated instead of mixing fake prices into the meter.
+            data = {s: v for s, v in data.items() if v[1] == "real"}
+            if len(data) < 6:
+                _portfolio_jobs[job_id] = {"status": "error", "result": None,
+                                           "error": "Troppo pochi simboli reali per il misuratore di forza"}
+                return
         xctx = None
         if body.cross_pair:
             xctx = await asyncio.to_thread(_build_xpair_context, data, xwin[0], xwin[1], xwin[2])
+        sctx = None
+        if body.strength:
+            kwin = xwin[0]  # momentum window in bars for the strength meter
+            sctx = await asyncio.to_thread(_build_strength_context, data, kwin, xwin[2])
         years = sorted({int(y) for y in body.years})
         result = await asyncio.to_thread(_ml_walkforward_compute, data, years,
                                          body.start_balance, body.lot_per_10k, body.max_concurrent,
-                                         tstop, xctx, min_bars)
+                                         tstop, xctx, min_bars, sctx)
         if result is None:
             _portfolio_jobs[job_id] = {"status": "error", "result": None,
                                        "error": "Nessun edge appreso / storico insufficiente"}
             return
         result["timeframe"] = body.timeframe.upper()
         result["cross_pair"] = body.cross_pair
+        result["strength"] = body.strength
         result["time_stop_bars"] = tstop
         _portfolio_jobs[job_id] = {"status": "done", "result": result, "error": None}
     except Exception as e:
@@ -1396,6 +1425,79 @@ def _cand_trend(candles, closes, i):
     return None
 
 
+STRENGTH_SYMBOLS = ["EUR/USD", "GBP/USD", "USD/CHF", "USD/CAD", "AUD/USD",
+                    "EUR/GBP", "EUR/AUD", "EUR/CHF", "EUR/CAD",
+                    "GBP/AUD", "GBP/CHF", "AUD/CAD"]
+
+
+def _build_strength_context(data, k=20, zwin=60):
+    """Currency-strength meter: at each timestamp, strength(C) = mean over all pairs
+    containing C of the sign-adjusted k-bar momentum (base:+, quote:-). For each pair
+    B/Q we then track diff = strength(B) - strength(Q) and its rolling z-score. Trade
+    the strong-vs-weak divergence (BUY when base far stronger, SELL when far weaker).
+    No look-ahead (uses data <= t). Returns {sym: {time_str: z}}."""
+    kret = {}   # sym -> {time: k-bar log return}
+    order = {}  # sym -> ordered list of time_str
+    for sym, (candles, _s) in data.items():
+        if not candles or "/" not in sym:
+            continue
+        cs = sorted(((c["time"], c["c"]) for c in candles), key=lambda x: _pt(x[0]))
+        order[sym] = [t for (t, _) in cs]
+        closes = [c for (_, c) in cs]
+        rr = {}
+        for i in range(len(closes)):
+            if i >= k and closes[i - k] > 0 and closes[i] > 0:
+                rr[cs[i][0]] = math.log(closes[i] / closes[i - k])
+        kret[sym] = rr
+    # per-currency strength per timestamp
+    cur_contrib = {}  # time -> {cur: [contribs]}
+    for sym, rr in kret.items():
+        base, quote = sym.split("/")
+        for t, r in rr.items():
+            slot = cur_contrib.setdefault(t, {})
+            slot.setdefault(base, []).append(r)
+            slot.setdefault(quote, []).append(-r)
+    strength = {}  # time -> {cur: mean}
+    for t, d in cur_contrib.items():
+        strength[t] = {c: (sum(v) / len(v)) for c, v in d.items()}
+    ctx = {}
+    for sym in kret:
+        base, quote = sym.split("/")
+        times = order[sym]
+        diffs = {}
+        for t in times:
+            st = strength.get(t)
+            if st and base in st and quote in st:
+                diffs[t] = st[base] - st[quote]
+        seq = [t for t in times if t in diffs]
+        zmap = {}
+        for idx, t in enumerate(seq):
+            if idx >= zwin:
+                w = [diffs[seq[j]] for j in range(idx - zwin, idx + 1)]
+                m = sum(w) / len(w)
+                zmap[t] = (diffs[t] - m) / (_std(w) or 1e-9)
+            else:
+                zmap[t] = 0.0
+        ctx[sym] = zmap
+    return ctx
+
+
+def _make_strength_cand(zmap, thr=1.0):
+    """Momentum on currency-strength divergence: BUY when base is far stronger than
+    quote (z>thr), SELL when far weaker (z<-thr)."""
+    def cand(candles, closes, i):
+        z = zmap.get(candles[i]["time"])
+        if z is None:
+            return None
+        if z > thr:
+            return "BUY"
+        if z < -thr:
+            return "SELL"
+        return None
+    return cand
+
+
+
 def _build_xpair_context(data, w1=20, w2=60, wz=60):
     """Cross-pair features shared across symbols, computed contemporaneously (no
     look-ahead): dollar-strength momentum (w1/w2 bars), the pair's idiosyncratic
@@ -1613,22 +1715,22 @@ def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, t
     return trades
 
 
-def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None, tstop=20):
-    """ML-gated mean-reversion sleeve (the walk-forward winner). A trend/breakout
-    sleeve was tested but hurt robustness without a stop loss (added tail risk in
-    choppy years), so it is disabled by default. NO stop loss; time-stop exit."""
+def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None, tstop=20, cand_fn=None):
+    """ML-gated entry sleeve (mean-reversion by default). NO stop loss; time-stop exit.
+    A custom cand_fn (e.g. currency-strength divergence) can be supplied."""
     closes = [c["c"] for c in candles]
     all_trades, sleeves = [], {}
-    for name, cand_fn in (("meanrev", _cand_meanrev),):
+    sleeve_name = "strength" if cand_fn is not None else "meanrev"
+    for name, cfn in ((sleeve_name, cand_fn or _cand_meanrev),):
         try:
-            fit = _ml_fit(candles, closes, cfg, test_start, cand_fn, ctx, tstop)
+            fit = _ml_fit(candles, closes, cfg, test_start, cfn, ctx, tstop)
         except Exception:
             logger.exception("ml sleeve %s fit failed", name)
             fit = None
         if fit is None:
             continue
         model, tp_mult, thr, n_train, val_net = fit
-        trs = _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, test_end, cand_fn, ctx)
+        trs = _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, test_end, cfn, ctx)
         for t in trs:
             t["sleeve"] = name
         all_trades.extend(trs)
@@ -1636,8 +1738,9 @@ def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None, tstop
                          "train_candidates": n_train, "val_net": val_net}
     if not all_trades:
         return None
-    mr = sleeves.get("meanrev", {})
-    info = {"label": "ML mean-reversion (gradient boosting)", "entry": "ml_meanrev",
+    mr = sleeves.get("meanrev") or sleeves.get("strength") or {}
+    lbl = "ML currency-strength cross" if "strength" in sleeves else "ML mean-reversion (gradient boosting)"
+    info = {"label": lbl, "entry": "strength" if "strength" in sleeves else "ml_meanrev",
             "time_stop": tstop, "sleeves": sleeves,
             "tp_atr": mr.get("tp_atr"), "threshold": mr.get("threshold"),
             "train_candidates": sum(s["train_candidates"] for s in sleeves.values())}
@@ -1690,7 +1793,7 @@ def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurren
 
 
 def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurrent,
-                            tstop=20, xctx=None, min_bars=300):
+                            tstop=20, xctx=None, min_bars=300, sctx=None):
     """Multi-year walk-forward: for each test year Y, retrain the ML gate ONLY on
     data before Jan 1 of Y (validation on Y-1), then trade Y out-of-sample. Balance
     resets to start_balance each year so per-year results are directly comparable.
@@ -1711,9 +1814,10 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
             if _pt(candles[0]["time"]) >= test_start - timedelta(days=400):
                 continue
             (year_real if source == "real" else year_sim).append(sym)
+            cand_fn = _make_strength_cand(sctx[sym]) if (sctx and sym in sctx) else None
             try:
                 picked = _ml_ensemble_trades(candles, cfg, test_start, test_end,
-                                             xctx.get(sym) if xctx else None, tstop)
+                                             xctx.get(sym) if xctx else None, tstop, cand_fn)
             except Exception:
                 logger.exception("wf ensemble %s %s failed", sym, Y)
                 picked = None
