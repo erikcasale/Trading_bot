@@ -1870,6 +1870,46 @@ def _ml_symbol(candles, cfg, start, ctx=None):
     return _ml_ensemble_trades(candles, cfg, start, None, ctx)
 
 
+def _live_signals(candles, cfg, sleeve_defs, ctx, tstop):
+    """LIVE entry signals for the most recent COMPLETED bar. Fits the ML gate on all
+    history before the last bar (no look-ahead) and checks if each sleeve triggers a
+    high-probability entry right now. Returns [{sleeve, side, entry, tp, proba}]."""
+    closes = [c["c"] for c in candles]
+    n = len(candles)
+    if n < 300:
+        return []
+    i = n - 1
+    train_end = _pt(candles[i]["time"])
+    sigs = []
+    for name, cfn in sleeve_defs:
+        try:
+            side = cfn(candles, closes, i)
+        except Exception:
+            side = None
+        if not side:
+            continue
+        try:
+            fit = _ml_fit(candles, closes, cfg, train_end, cfn, ctx, tstop)
+        except Exception:
+            logger.exception("live fit %s failed", name)
+            fit = None
+        if fit is None:
+            continue
+        model, tp_mult, thr, _ntr, _val = fit
+        try:
+            proba = float(model.predict_proba([_ml_features(candles, closes, i, side, ctx)])[0][1])
+        except Exception:
+            continue
+        if proba < thr:
+            continue
+        entry = closes[i]
+        atr = _atr_at(candles, i, 14) or cfg["vol"]
+        tp = round(entry + (1 if side == "BUY" else -1) * atr * tp_mult, cfg["digits"])
+        sigs.append({"sleeve": name, "side": side, "entry": round(entry, cfg["digits"]),
+                     "tp": tp, "proba": round(proba, 3)})
+    return sigs
+
+
 def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurrent=10):
     try:
         start = datetime.fromisoformat(start_date + "T00:00:00+00:00")
@@ -2693,6 +2733,190 @@ async def execute_live(body: LiveOrderReq, user: dict = Depends(get_current_user
 
 
 # ---------------------------------------------------------------------------
+# Auto-trading engine (combo D1 · 7 mean-rev / 3 forza) on the MT5 demo account
+# ---------------------------------------------------------------------------
+AUTOBOT_CAPS = {"meanrev": 7, "strength": 3}
+AUTOBOT_MAX = 10
+AUTOBOT_TSTOP_DAYS = 28          # ~20 D1 trading bars
+AUTOBOT_LOT_PER_10K = 0.1
+AUTOBOT_CYCLE_HOURS = 6
+_autobot_lock = asyncio.Lock()
+
+
+def _autobot_strategy():
+    return {"name": "Combo D1 · 7 mean-rev / 3 forza valutaria", "timeframe": "D1",
+            "pairs": len(STRENGTH_SYMBOLS), "caps": AUTOBOT_CAPS, "max_concurrent": AUTOBOT_MAX,
+            "lot_per_10k": AUTOBOT_LOT_PER_10K, "time_stop_days": AUTOBOT_TSTOP_DAYS,
+            "stop_loss": None, "universe": STRENGTH_SYMBOLS}
+
+
+def _sleeve_of(comment):
+    return "strength" if "strength" in (comment or "") else "meanrev"
+
+
+async def _autobot_log(msg, err=None):
+    entry = {"ts": datetime.now(timezone.utc).isoformat(), "msg": msg}
+    await db.autobot.update_one({"_id": "engine"},
+                                {"$push": {"log": {"$each": [entry], "$slice": -60}},
+                                 "$set": {"last_error": err}}, upsert=True)
+    logger.info("autobot: %s", msg)
+
+
+async def _autobot_cycle(trigger="scheduled"):
+    if _autobot_lock.locked():
+        return
+    async with _autobot_lock:
+        doc = await db.autobot.find_one({"_id": "engine"}) or {}
+        if not doc.get("running"):
+            return
+        await db.autobot.update_one({"_id": "engine"}, {"$set": {"cycle_status": "running"}}, upsert=True)
+        placed, closed = [], 0
+        try:
+            if not await metaapi_service.check_connected():
+                await _autobot_log("Broker non connesso — ciclo saltato")
+                return
+            acct = await metaapi_service.get_account_info()
+            equity = acct["equity"] if acct else 10000.0
+            lot = max(0.01, round(AUTOBOT_LOT_PER_10K * equity / 10000.0, 2))
+            positions = await metaapi_service.get_positions() or []
+            ours = [p for p in positions if (p.get("comment") or "").startswith("apexflow")]
+            now = datetime.now(timezone.utc)
+            for p in ours:
+                ot = _pt(p["time"]) if p.get("time") else None
+                if ot and (now - ot).days >= AUTOBOT_TSTOP_DAYS:
+                    r = await metaapi_service.close_position(p["id"])
+                    if r["ok"]:
+                        closed += 1
+                        await _autobot_log(f"Time-stop: chiusa {p['symbol']} {p['side']} dopo {(now - ot).days}g")
+            if closed:
+                positions = await metaapi_service.get_positions() or []
+                ours = [p for p in positions if (p.get("comment") or "").startswith("apexflow")]
+            open_cnt = {"meanrev": 0, "strength": 0}
+            held = set()
+            for p in ours:
+                sl = _sleeve_of(p.get("comment"))
+                open_cnt[sl] = open_cnt.get(sl, 0) + 1
+                held.add((p["symbol"].replace("/", ""), sl))
+            total_open = len(ours)
+
+            data = {}
+            for sym in STRENGTH_SYMBOLS:
+                candles, source = await _get_d1_history(sym, 700)
+                if source == "real":
+                    data[sym] = (candles, source)
+            if len(data) < 6:
+                await _autobot_log(f"Solo {len(data)} coppie reali disponibili — ciclo saltato")
+                return
+            sctx = await asyncio.to_thread(_build_strength_context, data, 20, 60)
+
+            def eval_sym(sym, candles):
+                cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
+                strength_cand = _make_strength_cand(sctx[sym]) if sym in sctx else None
+                sleeve_defs = [("meanrev", _cand_meanrev)]
+                if strength_cand:
+                    sleeve_defs.append(("strength", strength_cand))
+                return _live_signals(candles, cfg, sleeve_defs, None, 20)
+
+            for sym, (candles, _s) in data.items():
+                try:
+                    sigs = await asyncio.to_thread(eval_sym, sym, candles)
+                except Exception:
+                    logger.exception("autobot signal %s failed", sym)
+                    sigs = []
+                for s in sigs:
+                    sl = s["sleeve"]
+                    bkey = sym.replace("/", "")
+                    if (bkey, sl) in held or open_cnt.get(sl, 0) >= AUTOBOT_CAPS[sl] or total_open >= AUTOBOT_MAX:
+                        continue
+                    r = await metaapi_service.place_market_order(sym, s["side"], lot, sl=None,
+                                                                 tp=s["tp"], comment=f"apexflow_{sl}")
+                    if r["ok"]:
+                        placed.append({"symbol": sym, "side": s["side"], "sleeve": sl, "lot": lot, "tp": s["tp"]})
+                        open_cnt[sl] += 1; held.add((bkey, sl)); total_open += 1
+                        await _autobot_log(f"Aperta {sym} {s['side']} {lot} lotti [{sl}] TP {s['tp']}")
+                    else:
+                        await _autobot_log(f"Ordine {sym} {s['side']} fallito: {r.get('error')}", err=r.get("error"))
+            await _autobot_log(f"Ciclo completato ({trigger}): {len(placed)} nuovi ordini · "
+                               f"{closed} time-stop · {total_open} posizioni attive")
+        except Exception as e:
+            logger.exception("autobot cycle failed")
+            await _autobot_log(f"Errore ciclo: {str(e)[:150]}", err=str(e)[:200])
+        finally:
+            nxt = (datetime.now(timezone.utc) + timedelta(hours=AUTOBOT_CYCLE_HOURS)).isoformat()
+            await db.autobot.update_one({"_id": "engine"},
+                                        {"$set": {"cycle_status": "idle",
+                                                  "last_run": datetime.now(timezone.utc).isoformat(),
+                                                  "next_run": nxt}}, upsert=True)
+
+
+async def _autobot_loop():
+    await asyncio.sleep(8)
+    while True:
+        try:
+            doc = await db.autobot.find_one({"_id": "engine"}) or {}
+            if doc.get("running") and not _autobot_lock.locked():
+                nr = doc.get("next_run")
+                due = (not nr) or (_pt(nr) <= datetime.now(timezone.utc))
+                if due:
+                    asyncio.create_task(_autobot_cycle("scheduled"))
+        except Exception:
+            logger.exception("autobot loop tick failed")
+        await asyncio.sleep(60)
+
+
+@api_router.get("/autobot")
+async def autobot_status(user: dict = Depends(get_current_user)):
+    doc = await db.autobot.find_one({"_id": "engine"}, {"_id": 0}) or {"running": False, "log": []}
+    status = await metaapi_service.get_status()
+    account = await metaapi_service.get_account_info()
+    positions = await metaapi_service.get_positions()
+    closed = await metaapi_service.get_closed_deals(120)
+    ours = [p for p in (positions or []) if (p.get("comment") or "").startswith("apexflow")]
+    for p in ours:
+        p["sleeve"] = _sleeve_of(p.get("comment"))
+    return {"running": doc.get("running", False), "strategy": _autobot_strategy(),
+            "connected": status.get("connected"), "broker": status, "account": account,
+            "last_run": doc.get("last_run"), "next_run": doc.get("next_run"),
+            "cycle_status": doc.get("cycle_status", "idle"), "last_error": doc.get("last_error"),
+            "open_trades": ours, "closed_trades": closed or [],
+            "log": (doc.get("log") or [])[-30:][::-1]}
+
+
+@api_router.post("/autobot/start")
+async def autobot_start(user: dict = Depends(get_current_user)):
+    await db.autobot.update_one({"_id": "engine"},
+                                {"$set": {"running": True, "strategy": _autobot_strategy(),
+                                          "next_run": datetime.now(timezone.utc).isoformat()}}, upsert=True)
+    await _autobot_log("Bot AVVIATO — valutazione segnali in corso")
+    asyncio.create_task(_autobot_cycle("start"))
+    return {"running": True}
+
+
+@api_router.post("/autobot/stop")
+async def autobot_stop(user: dict = Depends(get_current_user)):
+    await db.autobot.update_one({"_id": "engine"}, {"$set": {"running": False}}, upsert=True)
+    await _autobot_log("Bot FERMATO — nessun nuovo ordine (le posizioni aperte restano)")
+    return {"running": False}
+
+
+@api_router.post("/autobot/run-now")
+async def autobot_run_now(user: dict = Depends(get_current_user)):
+    doc = await db.autobot.find_one({"_id": "engine"}) or {}
+    if not doc.get("running"):
+        raise HTTPException(status_code=400, detail="Il bot non è attivo")
+    asyncio.create_task(_autobot_cycle("manual"))
+    return {"ok": True}
+
+
+@api_router.post("/autobot/close/{pid}")
+async def autobot_close(pid: str, user: dict = Depends(get_current_user)):
+    r = await metaapi_service.close_position(pid)
+    if not r["ok"]:
+        raise HTTPException(status_code=400, detail=r.get("error", "Chiusura non riuscita"))
+    return r
+
+
+# ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
@@ -2714,6 +2938,7 @@ async def startup():
     try:
         import asyncio
         asyncio.create_task(metaapi_service.warm_up())
+        asyncio.create_task(_autobot_loop())
     except Exception:
         pass
 

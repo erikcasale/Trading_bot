@@ -18,6 +18,9 @@ TF_MAP = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
 SYMBOL_MAP = {
     "EUR/USD": "EURUSD", "GBP/USD": "GBPUSD", "XAU/USD": "XAUUSD",
     "USD/CHF": "USDCHF", "USD/CAD": "USDCAD", "AUD/USD": "AUDUSD",
+    "EUR/GBP": "EURGBP", "EUR/AUD": "EURAUD", "EUR/CHF": "EURCHF",
+    "EUR/CAD": "EURCAD", "GBP/AUD": "GBPAUD", "GBP/CHF": "GBPCHF",
+    "AUD/CAD": "AUDCAD",
     "BTC/USDT": "BTCUSD", "ETH/USDT": "ETHUSD",
     "NVDA": "NVDA", "AAPL": "AAPL", "US30": "US30",
 }
@@ -218,13 +221,19 @@ async def get_positions():
         for p in (rows or []):
             broker_sym = p.get("symbol", "")
             typ = str(p.get("type", "")).upper()
+            t = p.get("time")
             out.append({
+                "id": str(p.get("id", "")),
                 "symbol": _REV_SYMBOL.get(broker_sym, broker_sym),
                 "side": "SELL" if "SELL" in typ else "BUY",
                 "volume": p.get("volume"),
                 "profit": round(p.get("profit", 0), 2),
                 "open_price": p.get("openPrice"),
                 "current_price": p.get("currentPrice"),
+                "tp": p.get("takeProfit"),
+                "swap": round(p.get("swap", 0) or 0, 2),
+                "comment": p.get("comment") or p.get("clientId") or "",
+                "time": t.isoformat() if hasattr(t, "isoformat") else (str(t) if t else None),
             })
         _pos_cache.update({"ts": now, "data": out})
         return out
@@ -403,7 +412,7 @@ async def warm_up():
         return False
 
 
-async def place_market_order(symbol: str, side: str, volume: float, sl=None, tp=None):
+async def place_market_order(symbol: str, side: str, volume: float, sl=None, tp=None, comment="apexflow"):
     """Execute a real market order on the connected demo account."""
     if not await check_connected():
         return {"ok": False, "error": "Account non connesso al broker"}
@@ -413,10 +422,65 @@ async def place_market_order(symbol: str, side: str, volume: float, sl=None, tp=
         fn = conn.create_market_buy_order if side.upper() == "BUY" else conn.create_market_sell_order
         result = await asyncio.wait_for(
             fn(symbol=sym, volume=volume, stop_loss=sl, take_profit=tp,
-               options={"comment": "apexflow", "clientId": "apexflow-fwd"}),
+               options={"comment": comment[:26]}),
             timeout=30,
         )
+        _pos_cache["ts"] = 0.0  # invalidate so the new position shows immediately
+        return {"ok": True, "result": result}
+    except Exception as e:
+        details = getattr(e, "details", None) or getattr(e, "args", None)
+        logger.warning("place_market_order failed: %s | details=%s", e, details)
+        _state["last_error"] = str(e)[:220]
+        return {"ok": False, "error": str(e)[:220], "details": str(details)[:400]}
+
+
+async def close_position(position_id: str):
+    """Close an open position by id at market on the connected demo account."""
+    if not await check_connected():
+        return {"ok": False, "error": "Account non connesso al broker"}
+    try:
+        conn = await _ensure_rpc()
+        result = await asyncio.wait_for(conn.close_position(str(position_id)), timeout=30)
+        _pos_cache["ts"] = 0.0
         return {"ok": True, "result": result}
     except Exception as e:
         _state["last_error"] = str(e)[:220]
         return {"ok": False, "error": str(e)[:220]}
+
+
+async def get_closed_deals(days: int = 120):
+    """Realized closing deals (round-trip P&L) from broker history, newest first.
+    Returns list [{symbol, side, volume, profit, price, time, comment, position_id}]
+    or None if unavailable."""
+    if not await check_connected():
+        return None
+    try:
+        import datetime as _dt
+        conn = await _ensure_rpc()
+        end = _dt.datetime.now(_dt.timezone.utc)
+        start = end - _dt.timedelta(days=days)
+        res = await asyncio.wait_for(conn.get_deals_by_time_range(start, end), timeout=20)
+        deals = res.get("deals", res) if isinstance(res, dict) else res
+        out = []
+        for d in (deals or []):
+            if str(d.get("entryType", "")).upper() != "DEAL_ENTRY_OUT":
+                continue
+            broker_sym = d.get("symbol", "")
+            typ = str(d.get("type", "")).upper()  # closing deal type is opposite of position side
+            t = d.get("time")
+            out.append({
+                "symbol": _REV_SYMBOL.get(broker_sym, broker_sym),
+                "side": "BUY" if "SELL" in typ else "SELL",  # original position side
+                "volume": d.get("volume"),
+                "profit": round((d.get("profit", 0) or 0) + (d.get("swap", 0) or 0) + (d.get("commission", 0) or 0), 2),
+                "price": d.get("price"),
+                "time": t.isoformat() if hasattr(t, "isoformat") else (str(t) if t else None),
+                "comment": d.get("comment") or d.get("brokerComment") or "",
+                "position_id": str(d.get("positionId", "")),
+            })
+        out.sort(key=lambda x: x["time"] or "", reverse=True)
+        return out
+    except Exception as e:
+        _state["last_error"] = str(e)[:220]
+        _state["connection"] = None
+        return None
