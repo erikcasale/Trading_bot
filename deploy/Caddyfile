@@ -1,0 +1,20 @@
+{
+	# email opzionale per Let's Encrypt (metti la tua se vuoi le notifiche di scadenza)
+	email {$ACME_EMAIL:admin@example.com}
+}
+
+{$DOMAIN} {
+	encode gzip
+
+	# tutte le chiamate /api/* vanno al backend FastAPI (path preservato)
+	handle /api/* {
+		reverse_proxy backend:8001
+	}
+
+	# tutto il resto = la PWA React (SPA fallback su index.html)
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

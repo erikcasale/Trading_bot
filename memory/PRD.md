@@ -288,6 +288,21 @@ Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezza
 - Accesso invariato: JWT, account demo demo@apexflow.io / apexflow2026 + pulsante "Entra con Account Demo"; token in localStorage → login persistente nella PWA.
 - NOTA: per un'installazione permanente/always-on conviene usare l'URL DEPLOYATO (il preview è ambiente di sviluppo). Il backend/bot gira solo mentre l'ambiente è attivo.
 
+## SELF-HOSTING VPS — Pacchetto Docker per indipendenza da Emergent (2026-06): CONSEGNATO ✅
+- Richiesta utente: non voler dipendere da Emergent; far girare bot+backend+PWA su un proprio VPS. Scelte: Hetzner CX22 + MongoDB Atlas free, Docker, solo IP (→ HTTPS via DuckDNS), indipendenza totale (tutto sul VPS), con possibilità di aggiornamenti.
+- Spiegato onestamente: un bot di auto-trading NON può girare "da solo" nel telefono (i trade avvengono sul server del broker/MetaApi; l'automazione 24/7 richiede un processo sempre acceso; i modelli ML Python non girano su mobile). L'architettura corretta = server sempre acceso + telefono come telecomando.
+- Raccomandato VPS: **Hetzner CX22** (2 vCPU/4GB, ~4,50€/mese) come miglior scelta; Atlas M0 free per il DB; DuckDNS per HTTPS gratuito su IP.
+- Pacchetto creato in `/app/deploy/`:
+  - `backend.Dockerfile` (python:3.11-slim, pip con extra-index per emergentintegrations, uvicorn server:app:8001)
+  - `web.Dockerfile` (node build della PWA con REACT_APP_BACKEND_URL=https://${DOMAIN} → Caddy serve static + proxy /api + HTTPS auto)
+  - `Caddyfile` (handle /api/* → backend:8001; SPA fallback; Let's Encrypt automatico per {$DOMAIN})
+  - `docker-compose.yml` (backend + web; web pubblica 80/443; backend solo interno; volumi caddy_data/config; restart unless-stopped)
+  - `.env.example` (DOMAIN, ACME_EMAIL, MONGO_URL, DB_NAME, JWT_SECRET, CORS_ORIGINS, ADMIN_EMAIL/PASSWORD, METAAPI_TOKEN/ACCOUNT_ID, TELEGRAM_BOT_TOKEN, EMERGENT_LLM_KEY)
+  - `update.sh` (git pull + docker compose up -d --build + prune)
+  - `README.md` (guida passo-passo IT: crea VPS → DuckDNS → Atlas → Docker → Save to GitHub → clone → .env → up)
+- Aggiornamenti: sviluppo su Emergent → "Save to GitHub" → sul VPS `./deploy/update.sh` (i dati Atlas e le posizioni aperte restano).
+- Verifiche statiche (Docker non disponibile in questo ambiente, la build gira sul VPS): nomi env combaciano col codice (MONGO_URL/DB_NAME/JWT_SECRET/ADMIN_*/METAAPI_* obbligatori tutti presenti); target `server:app` esiste (server.py:33); `/api` incluso; frontend same-origin; compose YAML valido; `deploy/.env` in .gitignore.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).
