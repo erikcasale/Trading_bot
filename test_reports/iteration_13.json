@@ -1,0 +1,20 @@
+{
+  "summary": "Frontend E2E verified for new combo weight sweep feature. Login via 'Entra con Account Demo' button works and lands on Dashboard. sweep-panel (Pesi tra i motori (combo)) is rendered with sweep-run-button 'Confronta pesi'. Clicking triggers async job; progress text goes '0/12 → 12/12'. Full result rendered in 289s on 2nd (warm) run (~7min on cold). sweep-result shows: 5-row weights table with best row (index 0: '7 mean-rev / 3 forza', composta +125.8%, DD -18.92%, calmar 6.65) highlighted green with check icon; per-year block '2023 +27.9% / 2024 +24.4% / 2025 +26.8% / 2026 +11.9%'; toast 'Miglior peso: 7 forza/3 mean-rev · composta +125.8%'; 2026 trades table with 150 rows (117 mean-rev badges + 33 forza badges — matches backend truth from review request). CSV export button enabled and downloads 'apexflow_trade_2026.csv'. All data-testids match the review request (sweep-panel, sweep-run-button, sweep-result, sweep-weights-table, sweep-weight-row-{0..4}, sweep-trades-2026-table, sweep-trade-2026-row-{i}, sweep-export-2026). No simulated-symbols warning banner shown — the single 'simulati' text match is only the login-page-style ambient demo disclaimer text, unrelated. 12 real Tickmill symbols consumed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "runSweep in ForwardTest.jsx polls every 4s with no explicit client-side timeout — fine because backend job completes in ~5-7min, but consider a UI 'still running' hint after 6min to reassure the user.",
+    "server.py continues to grow; splitting into routers still recommended (unchanged from iter11/12).",
+    "Weights table best-row detection relies on class substring; the check icon (single SVG) is only rendered on best row — verified."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skip per request)", "frontend": "100%"},
+  "test_credentials": "demo@apexflow.io / apexflow2026",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Combo weight sweep feature is fully functional end-to-end. Cold run ~7min (12 D1 fetches + ML retrains ×5 weights ×4 years), warm run ~5min. Best weight = '7 mean-rev / 3 forza' with 150 trades in 2026 (117 mean-rev + 33 forza). CSV export works. Poll timeout in tests should be >=8min for cold, >=5min for warm.",
+  "rca of the issue": "N/A"
+}

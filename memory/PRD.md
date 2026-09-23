@@ -234,6 +234,27 @@ Fix:
 - Avviso rosso `discover-simulated-warning` in UI quando `source != 'real'`.
 Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezzanotte GMT+2/+3): confrontare in MT5 con lo stesso fuso.
 
+## TENTATIVO 7 — PESI VARIABILI tra i motori (sweep) + lista trade 2026 (2026-06): RIUSCITO ✅
+- Richiesta utente: "peso variabile tra i motori per migliorare la resa; poi la lista dei trade eseguiti nel 2026". Scelte utente: (a) peso = ripartizione degli slot max-concorrenti tra i due motori (sizing pieno 0,1/€10k invariato per trade); (b) sweep automatico di più pesi con tabella comparativa; (c) lista trade 2026 (data in/out, simbolo, lato, motore, lotti, esito, P&L netto) in tabella + CSV.
+- Implementazione backend (`server.py`):
+  - `_nosl_settle(..., sleeve_caps=None)`: cap di posizioni contemporanee PER-SLEEVE (oltre al cap globale). Ora restituisce anche `trades` (lista completa: entry_date, exit_date, symbol, side, sleeve, lot, outcome TP/time-stop/aperta, net, entry/exit price).
+  - Estratto `_wf_gen_year(...)` (generazione trade out-of-sample di un anno, condiviso). `_ml_walkforward_compute` rifattorizzato per usarlo (invariato nel comportamento). I trade portano ora il campo `sleeve`.
+  - `_combo_weight_sweep_compute(...)`: genera i trade UNA volta per anno (mode combo), poi ri-settla per ogni peso (economico, no re-training). Best = resa composta più alta; estrae la lista trade 2026 del peso vincente. Calcola anche Calmar (composta/DD).
+  - `POST /api/portfolio/combo_weights` (job async, `ComboWeightReq`: years/start_balance/lot_per_10k/max_concurrent/timeframe/weights) → `_run_combo_weights` (fetch 12 STRENGTH_SYMBOLS reali, scarta simulati, costruisce strength context, pesi default 7/3·6/4·5/5·4/6·3/7). Stato via GET /api/portfolio/backtest/{job_id}.
+- Frontend `ForwardTest.jsx`: nuovo pannello `sweep-panel` ("Pesi tra i motori (combo)") con `sweep-run-button` ("Confronta pesi"), tabella `sweep-weights-table` (riga migliore evidenziata verde + check), dettaglio per-anno del best, tabella `sweep-trades-2026-table` (150 righe, badge motore forza/mean-rev), export CSV `sweep-export-2026` → apexflow_trade_2026.csv.
+- RISULTATO REALE (D1, 12 coppie REALI, SIM vuoto, walk-forward 2023-2026, no-SL, 0,1/€10k):
+  | Peso (mean-rev / forza) | Anni+ | Media/anno | Composta | Peggior DD | Calmar |
+  |---|---|---|---|---|---|
+  | **7 / 3** ✅ | **4/4** | **+22,75%** | **+125,8%** | **18,92%** | **6,65** |
+  | 6 / 4 | 4/4 | +17,95% | +92,0% | 25,22% | 3,65 |
+  | 5 / 5 | 4/4 | +18,02% | +93,0% | 24,45% | 3,80 |
+  | 4 / 6 | 4/4 | +16,40% | +80,1% | 32,00% | 2,50 |
+  | 3 / 7 | 3/4 | +8,25% | +35,4% | 33,94% | 1,04 |
+  - Best 7/3 dettaglio anni: 2023 +27,9% · 2024 +24,4% · 2025 +26,8% · 2026 +11,9%. 2026: 150 trade (117 mean-rev + 33 forza), somma netta +€1.190,64.
+- SCOPERTA: tiltare l'allocazione verso il mean-reversion (7 slot) con una piccola quota di forza (3 slot) MIGLIORA sia la resa (composta +125,8% vs +76/93% dei combo precedenti) SIA il drawdown (18,92%, il più basso). Più forza = più rumore/DD. Il default combo resta 5/5 nel pannello walk-forward; lo sweep è un pannello di ricerca separato.
+- Verifica: backend agent-tested via API (12 REAL, SIM vuoto); frontend testing-agent iteration 13 (100%, nessun bug), login demo OK, tabelle+CSV OK.
+- ONESTÀ (fondamentale): scegliere il peso "migliore" sullo storico è UN'ALTRA ottimizzazione → selection bias/overfitting possibile. Le rese composte alte derivano dal compounding annuale su dati passati. Resta un backtest storico, nessuna garanzia futura, no-SL sempre senza protezione di prezzo.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).
