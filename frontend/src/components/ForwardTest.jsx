@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 import { LineChart, Line, YAxis, ResponsiveContainer, Tooltip } from "recharts";
-import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target, Brain, CheckCircle2, XCircle, Clock, Copy, Download } from "lucide-react";
+import { Play, Pause, Loader2, FastForward, Rewind, Radio, Database, TrendingUp, Percent, Activity, Layers, CalendarRange, AlertTriangle, Target, Brain, CheckCircle2, XCircle, Clock, Copy, Download, Scale, ListOrdered } from "lucide-react";
 
 const PERIODS = [
   ["Settimana", "M15", 480],
@@ -46,6 +46,9 @@ export default function ForwardTest({ symbol }) {
   const [wf, setWf] = useState(null);
   const [wfState, setWfState] = useState({ loading: false, done: 0, total: 5 });
   const wfPoll = useRef(null);
+  const [sweep, setSweep] = useState(null);
+  const [sweepState, setSweepState] = useState({ loading: false, done: 0, total: 12 });
+  const sweepPoll = useRef(null);
   const pfPoll = useRef(null);
   const intradayPoll = useRef(null);
   const discPoll = useRef(null);
@@ -57,7 +60,7 @@ export default function ForwardTest({ symbol }) {
     if (discPoll.current) clearInterval(discPoll.current);
   }, [symbol]);
   useEffect(() => { setIntraday({}); setIntradayAll({ loading: false, done: 0, total: 0 }); }, [res]);
-  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); if (pfPoll.current) clearInterval(pfPoll.current); if (noslPoll.current) clearInterval(noslPoll.current); if (wfPoll.current) clearInterval(wfPoll.current); }, []);
+  useEffect(() => () => { if (discPoll.current) clearInterval(discPoll.current); if (intradayPoll.current) clearInterval(intradayPoll.current); if (pfPoll.current) clearInterval(pfPoll.current); if (noslPoll.current) clearInterval(noslPoll.current); if (wfPoll.current) clearInterval(wfPoll.current); if (sweepPoll.current) clearInterval(sweepPoll.current); }, []);
 
   const runPortfolio = async () => {
     if (pfPoll.current) clearInterval(pfPoll.current);
@@ -132,6 +135,53 @@ export default function ForwardTest({ symbol }) {
         } catch { /* keep polling */ }
       }, 4000);
     } catch { setWfState({ loading: false, done: 0, total: 5 }); toast.error("Impossibile avviare il walk-forward"); }
+  };
+
+  const runSweep = async () => {
+    if (sweepPoll.current) clearInterval(sweepPoll.current);
+    setSweep(null); setSweepState({ loading: true, done: 0, total: 12 });
+    try {
+      const { data } = await api.post("/portfolio/combo_weights", { years: [2023, 2024, 2025, 2026], start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10, timeframe: "D1" });
+      const jobId = data.job_id;
+      let ticks = 0;
+      sweepPoll.current = setInterval(async () => {
+        ticks += 1;
+        try {
+          const { data: st } = await api.get(`/portfolio/backtest/${jobId}`);
+          setSweepState({ loading: st.status === "running", done: st.done || 0, total: st.total || 12 });
+          if (st.status === "done") {
+            clearInterval(sweepPoll.current); setSweep(st.result); setSweepState({ loading: false, done: 12, total: 12 });
+            const b = st.result.weights[st.result.best_index];
+            toast.success(`Miglior peso: ${b.label} · composta ${b.compounded_return >= 0 ? "+" : ""}${b.compounded_return}%`);
+          } else if (st.status === "error" || ticks > 260) {
+            clearInterval(sweepPoll.current); setSweepState({ loading: false, done: 0, total: 12 });
+            toast.error(st.error || "Sweep pesi non riuscito");
+          }
+        } catch { /* keep polling */ }
+      }, 4000);
+    } catch { setSweepState({ loading: false, done: 0, total: 12 }); toast.error("Impossibile avviare lo sweep pesi"); }
+  };
+
+  const exportTrades2026Csv = () => {
+    if (!sweep) return;
+    const b = sweep.weights[sweep.best_index];
+    const L = [];
+    L.push("Apex Flow - Trade eseguiti nel 2026 (miglior peso combo)");
+    L.push(`Peso,${b.label}`);
+    L.push(`Slot mean-reversion,${b.meanrev_slots}`);
+    L.push(`Slot forza valutaria,${b.strength_slots}`);
+    L.push("");
+    L.push("Data ingresso,Data uscita,Simbolo,Lato,Motore,Lotti,Esito,Prezzo ingresso,Prezzo uscita,Net EUR");
+    (sweep.trades_2026 || []).forEach((t) => {
+      const eng = t.sleeve === "strength" ? "forza" : "mean-rev";
+      L.push(`${t.entry_date},${t.exit_date || "aperta"},${t.symbol},${t.side},${eng},${t.lot},${t.outcome},${t.entry},${t.exit ?? ""},${t.net}`);
+    });
+    const blob = new Blob([L.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "apexflow_trade_2026.csv";
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    toast.success("CSV trade 2026 scaricato");
   };
 
 
@@ -579,6 +629,132 @@ export default function ForwardTest({ symbol }) {
         )}
       </div>
 
+      {/* Engine weight sweep — split max-concurrent slots between the two engines */}
+      <div data-testid="sweep-panel" className="mb-3 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/5 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Scale className="w-4 h-4 text-[#F59E0B]" />
+            <span className="font-head font-bold text-sm">Pesi tra i motori (combo)</span>
+            <span className="overline">divido i 10 slot tra mean-reversion e forza · D1 · 12 coppie · 2023→2026</span>
+          </div>
+          <button data-testid="sweep-run-button" onClick={runSweep} disabled={sweepState.loading}
+            className="inline-flex items-center gap-1.5 bg-[#F59E0B] hover:bg-[#D97706] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
+            {sweepState.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Scale className="w-3.5 h-3.5" />}
+            {sweepState.loading ? `Addestro & testo ${sweepState.done}/${sweepState.total}…` : "Confronta pesi"}
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
+          Testo diverse <b className="text-white">ripartizioni degli slot</b> (max 10 posizioni contemporanee) tra i due motori — es. <b className="text-white">7 mean-rev / 3 forza</b>, 6/4, 5/5, 4/6, 3/7 — mantenendo il sizing pieno 0,1/€10k per ogni trade. Ogni peso è valutato sul walk-forward 2023→2026 (reset €10k/anno). <b className="text-[#F59E0B]">Il calcolo richiede qualche minuto.</b> Onestà: scegliere il peso "migliore" sullo storico è un'altra ottimizzazione → possibile overfitting, nessuna garanzia futura.
+        </p>
+
+        {sweep && (
+          <div data-testid="sweep-result" className="mt-3 space-y-2 fade-up">
+            {sweep.simulated_symbols?.length > 0 && (
+              <div className="flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/10 border border-[#F59E0B]/40 rounded-lg p-2">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{sweep.simulated_symbols.join(", ")}: dati simulati (esclusi dal calcolo forza).</span>
+              </div>
+            )}
+            <div className="rounded-lg border border-white/10 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px]" data-testid="sweep-weights-table">
+                  <thead>
+                    <tr className="text-[#64748B] text-left">
+                      <th className="px-2 py-1 font-medium">Peso (mean-rev / forza)</th>
+                      <th className="px-2 py-1 font-medium text-right">Anni +</th>
+                      <th className="px-2 py-1 font-medium text-right">Media/anno</th>
+                      <th className="px-2 py-1 font-medium text-right">Composta</th>
+                      <th className="px-2 py-1 font-medium text-right">Peggior DD</th>
+                      <th className="px-2 py-1 font-medium text-right">Calmar</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sweep.weights.map((w, i) => (
+                      <tr key={i} data-testid={`sweep-weight-row-${i}`} className={`border-t border-white/5 ${i === sweep.best_index ? "bg-[#10B981]/10" : ""}`}>
+                        <td className="px-2 py-1 font-semibold text-white">
+                          {i === sweep.best_index && <CheckCircle2 className="inline w-3 h-3 text-[#10B981] mr-1" />}
+                          {w.label}
+                        </td>
+                        <td className="px-2 py-1 text-right text-[#94A3B8]">{w.positive_years}/{w.years_tested}</td>
+                        <td className={`px-2 py-1 text-right ${w.avg_return >= 0 ? "text-[#10B981]" : "text-[#EF4444]"}`}>{w.avg_return >= 0 ? "+" : ""}{w.avg_return}%</td>
+                        <td className={`px-2 py-1 text-right font-bold ${w.compounded_return >= 0 ? "text-[#10B981]" : "text-[#EF4444]"}`}>{w.compounded_return >= 0 ? "+" : ""}{w.compounded_return}%</td>
+                        <td className="px-2 py-1 text-right text-[#F59E0B]">-{w.worst_drawdown}%</td>
+                        <td className="px-2 py-1 text-right text-[#CBD5E1]">{w.calmar ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Per-year detail of best weight */}
+            {(() => { const b = sweep.weights[sweep.best_index]; return (
+              <div className="rounded-lg border border-[#10B981]/30 bg-[#10B981]/5 p-2">
+                <div className="text-[11px] text-[#CBD5E1] mb-1">Miglior peso: <b className="text-white">{b.label}</b> · dettaglio per anno</div>
+                <div className="flex flex-wrap gap-2">
+                  {b.per_year.filter((y) => y.traded).map((y) => (
+                    <span key={y.year} className="text-[10px] font-mono px-2 py-1 rounded-md bg-[#0B0E17] border border-white/10">
+                      <b className="text-white">{y.year}</b> <span className={y.return_percent >= 0 ? "text-[#10B981]" : "text-[#EF4444]"}>{y.return_percent >= 0 ? "+" : ""}{y.return_percent}%</span> <span className="text-[#64748B]">DD -{y.max_drawdown}% · {y.closed_trades} chiusi</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ); })()}
+
+            {/* 2026 trades of best weight */}
+            <div className="flex items-center justify-between gap-2 mt-1">
+              <div className="flex items-center gap-1.5 text-[11px] text-[#CBD5E1]">
+                <ListOrdered className="w-3.5 h-3.5 text-[#0EA5E9]" />
+                <span>Trade eseguiti nel <b className="text-white">2026</b> (miglior peso) · {sweep.trades_2026?.length || 0} operazioni</span>
+              </div>
+              <button data-testid="sweep-export-2026" onClick={exportTrades2026Csv} disabled={!sweep.trades_2026?.length}
+                className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md border border-[#10B981]/40 text-[#10B981] hover:bg-[#10B981]/10 transition-colors disabled:opacity-50">
+                <Download className="w-3 h-3" />Esporta CSV
+              </button>
+            </div>
+            <div className="rounded-lg border border-white/10 overflow-hidden max-h-[360px] overflow-y-auto">
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px]" data-testid="sweep-trades-2026-table">
+                  <thead className="sticky top-0 bg-[#0B0E17]">
+                    <tr className="text-[#64748B] text-left">
+                      <th className="px-2 py-1 font-medium">Ingresso</th>
+                      <th className="px-2 py-1 font-medium">Uscita</th>
+                      <th className="px-2 py-1 font-medium">Simbolo</th>
+                      <th className="px-2 py-1 font-medium">Lato</th>
+                      <th className="px-2 py-1 font-medium">Motore</th>
+                      <th className="px-2 py-1 font-medium text-right">Lotti</th>
+                      <th className="px-2 py-1 font-medium">Esito</th>
+                      <th className="px-2 py-1 font-medium text-right">Net €</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(sweep.trades_2026 || []).map((t, i) => (
+                      <tr key={i} data-testid={`sweep-trade-2026-row-${i}`} className="border-t border-white/5">
+                        <td className="px-2 py-1 font-mono text-[#CBD5E1]">{t.entry_date}</td>
+                        <td className="px-2 py-1 font-mono text-[#94A3B8]">{t.exit_date || "aperta"}</td>
+                        <td className="px-2 py-1 font-semibold text-white">{t.symbol}</td>
+                        <td className={`px-2 py-1 font-bold ${t.side === "BUY" ? "text-[#10B981]" : "text-[#EF4444]"}`}>{t.side}</td>
+                        <td className="px-2 py-1">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${t.sleeve === "strength" ? "bg-[#8B5CF6]/20 text-[#A78BFA]" : "bg-[#0EA5E9]/20 text-[#38BDF8]"}`}>{t.sleeve === "strength" ? "forza" : "mean-rev"}</span>
+                        </td>
+                        <td className="px-2 py-1 text-right font-mono text-[#CBD5E1]">{t.lot}</td>
+                        <td className={`px-2 py-1 ${t.outcome === "TP" ? "text-[#10B981]" : t.outcome === "aperta" ? "text-[#F59E0B]" : "text-[#94A3B8]"}`}>{t.outcome}</td>
+                        <td className={`px-2 py-1 text-right font-bold ${t.net >= 0 ? "text-[#10B981]" : "text-[#EF4444]"}`}>{t.net >= 0 ? "+" : ""}{t.net}</td>
+                      </tr>
+                    ))}
+                    {!sweep.trades_2026?.length && (
+                      <tr><td className="px-2 py-2 text-[#64748B]" colSpan={8}>Nessun trade nel 2026 per il miglior peso.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <p className="text-[10px] text-[#94A3B8] leading-relaxed">
+              Il peso migliore è quello con la <b className="text-white">resa composta più alta</b> (evidenziato in verde) — guarda anche il Calmar (resa/drawdown) per il compromesso rischio. La lista trade 2026 riflette esattamente il peso vincente: nessuno stop di prezzo, uscita a TP o time-stop. Resta un backtest storico, nessuna garanzia futura.
+            </p>
+          </div>
+        )}
+      </div>
 
       {/* Portfolio backtest — shared 10k account, multiple instruments, from 2025 */}
       <div data-testid="portfolio-panel" className="mb-3 rounded-lg border border-[#8B5CF6]/40 bg-[#8B5CF6]/5 p-3">

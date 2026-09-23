@@ -1085,6 +1085,79 @@ async def _run_ml_wf(job_id, body):
         _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
 
 
+class ComboWeightReq(BaseModel):
+    years: List[int] = [2023, 2024, 2025, 2026]
+    start_balance: float = 10000.0
+    lot_per_10k: float = 0.1
+    max_concurrent: int = 10
+    timeframe: str = "D1"                 # "D1" | "H4"
+    weights: Optional[List[List[int]]] = None   # [[mr_slots, strength_slots], ...]
+
+
+@api_router.post("/portfolio/combo_weights")
+async def portfolio_combo_weights(body: ComboWeightReq, user: dict = Depends(get_current_user)):
+    """Sweep engine weights for the combo (mean-reversion + currency-strength): split
+    the max concurrent slots between the two engines and compare walk-forward results."""
+    job_id = str(uuid.uuid4())
+    _portfolio_jobs[job_id] = {"status": "running", "result": None, "error": None,
+                               "done": 0, "total": len(STRENGTH_SYMBOLS)}
+    _portfolio_jobs[job_id]["task"] = asyncio.create_task(_run_combo_weights(job_id, body))
+    return {"job_id": job_id, "status": "running", "total": len(STRENGTH_SYMBOLS)}
+
+
+async def _run_combo_weights(job_id, body):
+    try:
+        h4 = body.timeframe.upper() == "H4"
+        if h4:
+            want, fetch = int(6 * 260 * 6) + 200, _get_h4_history
+            tstop, min_bars, kwin, zwin = 120, 1500, 120, 360
+        else:
+            want, fetch = int(6 * 260) + 60, _get_d1_history
+            tstop, min_bars, kwin, zwin = 20, 300, 20, 60
+        data = {}
+        universe = STRENGTH_SYMBOLS
+        _portfolio_jobs[job_id]["total"] = len(universe)
+        for sym in universe:
+            candles, source = await fetch(sym, want)
+            data[sym] = (candles, source)
+            _portfolio_jobs[job_id]["done"] += 1
+        for sym in [s for s, (_, src) in data.items() if src != "real"]:
+            candles, source = await fetch(sym, want)
+            if source == "real":
+                data[sym] = (candles, source)
+        # honesty: currency-strength must use ONLY real data — drop simulated pairs.
+        data = {s: v for s, v in data.items() if v[1] == "real"}
+        if len(data) < 6:
+            _portfolio_jobs[job_id] = {"status": "error", "result": None,
+                                       "error": "Troppo pochi simboli reali per il misuratore di forza"}
+            return
+        sctx = await asyncio.to_thread(_build_strength_context, data, kwin, zwin)
+        mc = body.max_concurrent
+        if body.weights:
+            weights = [(int(w[0]), int(w[1])) for w in body.weights
+                       if len(w) == 2 and int(w[0]) >= 0 and int(w[1]) >= 0 and int(w[0]) + int(w[1]) <= mc]
+        else:
+            weights = [(mc - 3, 3), (mc - 4, 4), (mc // 2, mc - mc // 2), (4, mc - 4), (3, mc - 3)]
+        seen = set()
+        weights = [w for w in weights if not (w in seen or seen.add(w)) and w[0] > 0 and w[1] > 0]
+        if not weights:
+            weights = [(mc // 2, mc - mc // 2)]
+        years = sorted({int(y) for y in body.years})
+        result = await asyncio.to_thread(_combo_weight_sweep_compute, data, years,
+                                         body.start_balance, body.lot_per_10k, mc,
+                                         tstop, sctx, min_bars, weights)
+        if result is None:
+            _portfolio_jobs[job_id] = {"status": "error", "result": None,
+                                       "error": "Nessun edge appreso / storico insufficiente"}
+            return
+        result["timeframe"] = body.timeframe.upper()
+        _portfolio_jobs[job_id] = {"status": "done", "result": result, "error": None}
+    except Exception as e:
+        logger.exception("combo weight sweep job failed")
+        _portfolio_jobs[job_id] = {"status": "error", "result": None, "error": str(e)[:200]}
+
+
+
 
 
 def _pt(iso):
@@ -1102,9 +1175,12 @@ def _atr_at(candles, i, period=14):
 
 
 def _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_balance,
-                 lot_per_10k, max_concurrent, real_syms, sim_syms, mode, extra=None):
+                 lot_per_10k, max_concurrent, real_syms, sim_syms, mode, extra=None,
+                 sleeve_caps=None):
     """Shared no-SL settlement: event-driven COMPOUNDING equity, mark-to-market
-    equity curve (floating of open trades included), open-position detail."""
+    equity curve (floating of open trades included), open-position detail.
+    sleeve_caps (optional): {sleeve_name: max_concurrent_slots} splits the max
+    concurrent positions between the two engines (full 0.1/€10k size each)."""
     if not positions:
         return None
     events = []
@@ -1113,17 +1189,27 @@ def _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_bala
         events.append((p["exit_t"], 1, p))
     events.sort(key=lambda e: (e[0], e[1]))
     equity, open_count = start_balance, 0
+    sleeve_open = {}
     for tm, typ, p in events:
         if typ == 0:
+            sl = p.get("sleeve")
             if equity <= 0 or open_count >= max_concurrent:
                 p["skip"] = True
                 continue
+            if sleeve_caps is not None and sl in sleeve_caps:
+                if sleeve_open.get(sl, 0) >= sleeve_caps[sl]:
+                    p["skip"] = True
+                    continue
+                sleeve_open[sl] = sleeve_open.get(sl, 0) + 1
             p["lot"] = max(0.01, round(lot_per_10k * equity / 10000.0, 2))
             open_count += 1
         else:
             if p.get("skip"):
                 continue
             open_count -= 1
+            sl = p.get("sleeve")
+            if sleeve_caps is not None and sl in sleeve_caps:
+                sleeve_open[sl] = max(0, sleeve_open.get(sl, 0) - 1)
             if p["open"]:
                 continue  # open trades stay floating; only closed trades hit realized
             p["pnl"] = round(p["lot"] * p["contract"] * (p["exit"] - p["entry"]) * p["dir"], 2)
@@ -1183,6 +1269,27 @@ def _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_bala
             "adverse_move_pct": round(adverse / tp_dist * 100, 1),
         })
     open_detail.sort(key=lambda x: x["floating"])
+
+    trades_list = []
+    for p in used:
+        if not p.get("lot"):
+            continue
+        dg = p.get("digits", 5)
+        if p["open"]:
+            cur = price_on[p["sym"]][max(price_on[p["sym"]])]
+            net = round((cur - p["entry"]) * p["dir"] * p["lot"] * p["contract"], 2)
+            outcome, exit_date, exit_px = "aperta", None, round(cur, dg)
+        else:
+            net = p.get("pnl", 0.0)
+            outcome = "time-stop" if p.get("timed") else "TP"
+            exit_date, exit_px = p["exit_t"].date().isoformat(), round(p["exit"], dg)
+        trades_list.append({
+            "entry_date": p["entry_t"].date().isoformat(), "exit_date": exit_date,
+            "symbol": p["sym"], "side": p["side"], "sleeve": p.get("sleeve") or "",
+            "lot": p["lot"], "outcome": outcome, "net": net,
+            "entry": round(p["entry"], dg), "exit": exit_px,
+        })
+    trades_list.sort(key=lambda t: t["entry_date"])
     result = {
         "mode": mode, "start_date": start.date().isoformat(),
         "end_date": end.date().isoformat(), "start_balance": round(start_balance, 2),
@@ -1196,7 +1303,7 @@ def _nosl_settle(positions, price_on, all_dates, sym_strategy, start, start_bala
         "open_trades": len(open_p), "open_floating": open_float,
         "per_symbol": per_symbol, "real_symbols": real_syms, "sim_symbols": sim_syms,
         "sym_strategy": sym_strategy, "open_positions": open_detail,
-        "equity_curve": curve,
+        "equity_curve": curve, "trades": trades_list,
     }
     if extra:
         result.update(extra)
@@ -1804,6 +1911,69 @@ def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurren
                         lot_per_10k, max_concurrent, real_syms, sim_syms, "nosl_ml")
 
 
+def _wf_gen_year(data, Y, tstop, xctx, min_bars, sctx, mode):
+    """Generate the out-of-sample trades for test year Y (retrain on prior data only).
+    Returns (test_start, positions, price_on, all_dates, sym_strategy, year_real,
+    year_sim). Settlement (slot caps / sizing) is applied separately so a weight
+    sweep can re-settle the same trades without refitting the ML models."""
+    test_start = datetime(Y, 1, 1, tzinfo=timezone.utc)
+    test_end = datetime(Y + 1, 1, 1, tzinfo=timezone.utc)
+    positions = []
+    price_on, all_dates, sym_strategy = {}, set(), {}
+    year_real, year_sim = [], []
+    for sym, (candles, source) in data.items():
+        if not candles or len(candles) < min_bars:
+            continue
+        cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
+        # need training history before the test year
+        if _pt(candles[0]["time"]) >= test_start - timedelta(days=400):
+            continue
+        (year_real if source == "real" else year_sim).append(sym)
+        strength_cand = _make_strength_cand(sctx[sym]) if (sctx and sym in sctx) else None
+        if mode == "strength":
+            sleeve_defs = [("strength", strength_cand)] if strength_cand else None
+        elif mode == "combo":
+            sleeve_defs = [("meanrev", _cand_meanrev)]
+            if strength_cand:
+                sleeve_defs.append(("strength", strength_cand))
+        else:
+            sleeve_defs = [("meanrev", _cand_meanrev)]
+        if sleeve_defs is None:
+            continue
+        try:
+            picked = _ml_ensemble_trades(candles, cfg, test_start, test_end,
+                                         xctx.get(sym) if xctx else None, tstop, sleeve_defs)
+        except Exception:
+            logger.exception("wf ensemble %s %s failed", sym, Y)
+            picked = None
+        if picked is None:
+            continue
+        trades, info = picked
+        contract = CONTRACT_SIZE.get(sym, 100000)
+        price_on[sym] = {}
+        for c in candles:
+            dd = _pt(c["time"]).date()
+            if test_start <= _pt(c["time"]) < test_end:
+                price_on[sym][dd] = c["c"]
+                all_dates.add(dd)
+        if not price_on[sym]:
+            continue
+        year_end_px = max(price_on[sym])
+        sym_strategy[sym] = {"entry": "ml_ensemble", **info}
+        for t in trades:
+            et = _pt(t["entry_time"])
+            if not (test_start <= et < test_end):
+                continue
+            xt = _pt(t["exit_time"])
+            positions.append({"sym": sym, "side": t["side"], "dir": 1 if t["side"] == "BUY" else -1,
+                              "entry": t["entry"], "tp": t["tp"], "entry_t": et,
+                              "exit_t": xt, "exit": t["exit"], "contract": contract,
+                              "open": t["open"], "timed": t.get("timed", False),
+                              "sleeve": t.get("sleeve"),
+                              "last_price": price_on[sym][year_end_px], "digits": cfg["digits"]})
+    return test_start, positions, price_on, all_dates, sym_strategy, year_real, year_sim
+
+
 def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurrent,
                             tstop=20, xctx=None, min_bars=300, sctx=None, mode="meanrev"):
     """Multi-year walk-forward: for each test year Y, retrain the ML gate ONLY on
@@ -1812,60 +1982,8 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
     mode: "meanrev" | "strength" | "combo" (mean-reversion + currency-strength)."""
     per_year, real_syms_all, sim_syms_all = [], set(), set()
     for Y in years:
-        test_start = datetime(Y, 1, 1, tzinfo=timezone.utc)
-        test_end = datetime(Y + 1, 1, 1, tzinfo=timezone.utc)
-        positions = []
-        price_on, all_dates, sym_strategy = {}, set(), {}
-        year_real, year_sim = [], []
-        for sym, (candles, source) in data.items():
-            if not candles or len(candles) < min_bars:
-                continue
-            cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
-            # need training history before the test year
-            if _pt(candles[0]["time"]) >= test_start - timedelta(days=400):
-                continue
-            (year_real if source == "real" else year_sim).append(sym)
-            strength_cand = _make_strength_cand(sctx[sym]) if (sctx and sym in sctx) else None
-            if mode == "strength":
-                sleeve_defs = [("strength", strength_cand)] if strength_cand else None
-            elif mode == "combo":
-                sleeve_defs = [("meanrev", _cand_meanrev)]
-                if strength_cand:
-                    sleeve_defs.append(("strength", strength_cand))
-            else:
-                sleeve_defs = [("meanrev", _cand_meanrev)]
-            if sleeve_defs is None:
-                continue
-            try:
-                picked = _ml_ensemble_trades(candles, cfg, test_start, test_end,
-                                             xctx.get(sym) if xctx else None, tstop, sleeve_defs)
-            except Exception:
-                logger.exception("wf ensemble %s %s failed", sym, Y)
-                picked = None
-            if picked is None:
-                continue
-            trades, info = picked
-            contract = CONTRACT_SIZE.get(sym, 100000)
-            price_on[sym] = {}
-            for c in candles:
-                dd = _pt(c["time"]).date()
-                if test_start <= _pt(c["time"]) < test_end:
-                    price_on[sym][dd] = c["c"]
-                    all_dates.add(dd)
-            if not price_on[sym]:
-                continue
-            year_end_px = max(price_on[sym])
-            sym_strategy[sym] = {"entry": "ml_ensemble", **info}
-            for t in trades:
-                et = _pt(t["entry_time"])
-                if not (test_start <= et < test_end):
-                    continue
-                xt = _pt(t["exit_time"])
-                positions.append({"sym": sym, "side": t["side"], "dir": 1 if t["side"] == "BUY" else -1,
-                                  "entry": t["entry"], "tp": t["tp"], "entry_t": et,
-                                  "exit_t": xt, "exit": t["exit"], "contract": contract,
-                                  "open": t["open"], "timed": t.get("timed", False),
-                                  "last_price": price_on[sym][year_end_px], "digits": cfg["digits"]})
+        (test_start, positions, price_on, all_dates,
+         sym_strategy, year_real, year_sim) = _wf_gen_year(data, Y, tstop, xctx, min_bars, sctx, mode)
         res = _nosl_settle(positions, price_on, all_dates, sym_strategy, test_start, start_balance,
                            lot_per_10k, max_concurrent, year_real, year_sim, f"nosl_ml_wf_{Y}")
         year_real and real_syms_all.update(year_real)
@@ -1906,6 +2024,73 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
     return {"mode": "ml_walkforward", "start_balance": start_balance,
             "lot_per_10k": lot_per_10k, "years": per_year, "summary": summary,
             "real_symbols": sorted(real_syms_all), "simulated_symbols": sorted(sim_syms_all)}
+
+
+def _combo_weight_sweep_compute(data, years, start_balance, lot_per_10k, max_concurrent,
+                                tstop, sctx, min_bars, weights):
+    """Combo (mean-reversion + currency-strength) walk-forward with a SWEEP of engine
+    weights. Weight = how the max_concurrent slots are split between the two engines
+    (full 0.1/€10k size per trade). Trades are generated ONCE per year, then re-settled
+    for each weight (cheap), so only one round of ML training is needed. Returns a
+    comparative table across weights + the 2026 trade list of the best weight."""
+    gen, real_all, sim_all = {}, set(), set()
+    for Y in years:
+        gen[Y] = _wf_gen_year(data, Y, tstop, None, min_bars, sctx, "combo")
+        real_all.update(gen[Y][5]); sim_all.update(gen[Y][6])
+
+    def settle(Y, caps, tag):
+        ts, positions, price_on, all_dates, sym_strategy, yr, ys = gen[Y]
+        pos_copy = [dict(p) for p in positions]
+        return _nosl_settle(pos_copy, price_on, all_dates, sym_strategy, ts, start_balance,
+                            lot_per_10k, max_concurrent, yr, ys, tag, sleeve_caps=caps)
+
+    results = []
+    for mr, st in weights:
+        caps = {"meanrev": mr, "strength": st}
+        per_year, rets = [], []
+        for Y in years:
+            res = settle(Y, caps, f"combo_w_{mr}_{st}_{Y}")
+            if res is None:
+                per_year.append({"year": Y, "traded": False})
+                continue
+            per_year.append({"year": Y, "traded": True,
+                             "return_percent": res["return_true_percent"],
+                             "max_drawdown": res["max_drawdown"],
+                             "closed_trades": res["closed_trades"],
+                             "true_equity": res["true_equity"]})
+            rets.append(res["return_true_percent"])
+        if not rets:
+            continue
+        comp = start_balance
+        for r in rets:
+            comp *= (1 + r / 100.0)
+        worst_dd = max((y["max_drawdown"] for y in per_year if y.get("traded")), default=0.0)
+        comp_ret = round((comp - start_balance) / start_balance * 100, 1)
+        results.append({
+            "meanrev_slots": mr, "strength_slots": st, "label": f"{mr} mean-rev / {st} forza",
+            "positive_years": sum(1 for r in rets if r > 0), "years_tested": len(rets),
+            "avg_return": round(sum(rets) / len(rets), 2),
+            "compounded_return": comp_ret, "compounded_equity": round(comp, 2),
+            "worst_drawdown": round(worst_dd, 2),
+            "calmar": round(comp_ret / worst_dd, 2) if worst_dd > 0 else None,
+            "per_year": per_year,
+        })
+    if not results:
+        return None
+    best = max(range(len(results)), key=lambda i: results[i]["compounded_return"])
+    trades_2026 = []
+    if 2026 in years and gen.get(2026):
+        best_caps = {"meanrev": results[best]["meanrev_slots"],
+                     "strength": results[best]["strength_slots"]}
+        res = settle(2026, best_caps, "combo_best_2026")
+        if res:
+            trades_2026 = res["trades"]
+    return {"mode": "combo_weight_sweep", "start_balance": start_balance,
+            "lot_per_10k": lot_per_10k, "max_concurrent": max_concurrent,
+            "years": sorted(years), "weights": results, "best_index": best,
+            "trades_2026": trades_2026,
+            "real_symbols": sorted(real_all), "simulated_symbols": sorted(sim_all)}
+
 
 
 
