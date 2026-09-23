@@ -994,6 +994,8 @@ class MlWalkForwardReq(BaseModel):
     start_balance: float = 10000.0
     lot_per_10k: float = 0.1
     max_concurrent: int = 10
+    timeframe: str = "D1"       # "D1" | "H4"
+    cross_pair: bool = False    # add dollar-strength + relative-value features
 
 
 @api_router.post("/portfolio/ml_walkforward")
@@ -1009,23 +1011,40 @@ async def portfolio_ml_walkforward(body: MlWalkForwardReq, user: dict = Depends(
 
 async def _run_ml_wf(job_id, body):
     try:
-        want = int(6 * 260) + 60  # ~6 years so 2023 still has training history
+        h4 = body.timeframe.upper() == "H4"
+        if h4:
+            want = int(6 * 260 * 6) + 200   # ~6 yrs of H4 (6 bars/day), capped by pager
+            fetch = _get_h4_history
+            tstop, min_bars = 120, 1500      # ~4-week horizon on H4
+            xwin = (120, 360, 360)           # dollar-momentum / z-score windows in H4 bars
+        else:
+            want = int(6 * 260) + 60
+            fetch = _get_d1_history
+            tstop, min_bars = 20, 300
+            xwin = (20, 60, 60)
         data = {}
         for sym in FOREX_SYMBOLS:
-            candles, source = await _get_d1_history(sym, want)
+            candles, source = await fetch(sym, want)
             data[sym] = (candles, source)
             _portfolio_jobs[job_id]["done"] += 1
         for sym in [s for s, (_, src) in data.items() if src != "real"]:
-            candles, source = await _get_d1_history(sym, want)
+            candles, source = await fetch(sym, want)
             if source == "real":
                 data[sym] = (candles, source)
+        xctx = None
+        if body.cross_pair:
+            xctx = await asyncio.to_thread(_build_xpair_context, data, xwin[0], xwin[1], xwin[2])
         years = sorted({int(y) for y in body.years})
         result = await asyncio.to_thread(_ml_walkforward_compute, data, years,
-                                         body.start_balance, body.lot_per_10k, body.max_concurrent)
+                                         body.start_balance, body.lot_per_10k, body.max_concurrent,
+                                         tstop, xctx, min_bars)
         if result is None:
             _portfolio_jobs[job_id] = {"status": "error", "result": None,
                                        "error": "Nessun edge appreso / storico insufficiente"}
             return
+        result["timeframe"] = body.timeframe.upper()
+        result["cross_pair"] = body.cross_pair
+        result["time_stop_bars"] = tstop
         _portfolio_jobs[job_id] = {"status": "done", "result": result, "error": None}
     except Exception as e:
         logger.exception("ml walkforward job failed")
@@ -1377,54 +1396,55 @@ def _cand_trend(candles, closes, i):
     return None
 
 
-def _build_xpair_context(data):
+def _build_xpair_context(data, w1=20, w2=60, wz=60):
     """Cross-pair features shared across symbols, computed contemporaneously (no
-    look-ahead): dollar-strength momentum (20/60d), the pair's idiosyncratic
-    strength vs the dollar factor, and a relative-value stretch z-score. Returns
-    {sym: {date: [usd_mom20, usd_mom60, rel_strength20, spread_z60]}}."""
+    look-ahead): dollar-strength momentum (w1/w2 bars), the pair's idiosyncratic
+    strength vs the dollar factor, and a relative-value stretch z-score (wz bars).
+    Keyed by the raw candle timestamp so it works on any timeframe (D1/H4).
+    Returns {sym: {time_str: [usd_mom1, usd_mom2, rel_strength, spread_z]}}."""
     sign = {"EUR/USD": -1, "GBP/USD": -1, "AUD/USD": -1, "USD/CHF": 1, "USD/CAD": 1}
     series, ret = {}, {}
     for sym, (candles, _src) in data.items():
         if not candles:
             continue
-        s = sorted((_pt(c["time"]).date(), c["c"]) for c in candles)
+        s = sorted(((c["time"], c["c"]) for c in candles), key=lambda x: _pt(x[0]))
         series[sym] = s
         rr = {}
         for k in range(1, len(s)):
-            (_, p0), (d1, p1) = s[k - 1], s[k]
+            (_, p0), (t1, p1) = s[k - 1], s[k]
             if p0 > 0 and p1 > 0:
-                rr[d1] = sign.get(sym, 0) * math.log(p1 / p0)
+                rr[t1] = sign.get(sym, 0) * math.log(p1 / p0)
         ret[sym] = rr
-    gdates = sorted({d for rr in ret.values() for d in rr})
+    gtimes = sorted({t for rr in ret.values() for t in rr}, key=_pt)
     basket, usd_level, acc = {}, {}, 0.0
-    for d in gdates:
-        vals = [ret[sym][d] for sym in ret if d in ret[sym]]
-        basket[d] = sum(vals) / len(vals) if vals else 0.0
-        acc += basket[d]
-        usd_level[d] = acc
+    for t in gtimes:
+        vals = [ret[sym][t] for sym in ret if t in ret[sym]]
+        basket[t] = sum(vals) / len(vals) if vals else 0.0
+        acc += basket[t]
+        usd_level[t] = acc
     ctx = {}
     for sym, s in series.items():
-        dates = [d for (d, _) in s]
+        times = [t for (t, _) in s]
         rlvl, a = {}, 0.0
-        for d in dates:
-            r = ret[sym].get(d)
+        for t in times:
+            r = ret[sym].get(t)
             if r is not None:
-                a += r - basket.get(d, 0.0)
-            rlvl[d] = a
+                a += r - basket.get(t, 0.0)
+            rlvl[t] = a
         feats = {}
-        for idx, d in enumerate(dates):
-            back20 = dates[idx - 20] if idx >= 20 else dates[0]
-            back60 = dates[idx - 60] if idx >= 60 else dates[0]
-            um20 = usd_level.get(d, 0.0) - usd_level.get(back20, 0.0)
-            um60 = usd_level.get(d, 0.0) - usd_level.get(back60, 0.0)
-            rs20 = rlvl[d] - rlvl[back20]
-            if idx >= 60:
-                window = [rlvl[dates[j]] for j in range(idx - 60, idx + 1)]
+        for idx, t in enumerate(times):
+            b1 = times[idx - w1] if idx >= w1 else times[0]
+            b2 = times[idx - w2] if idx >= w2 else times[0]
+            um1 = usd_level.get(t, 0.0) - usd_level.get(b1, 0.0)
+            um2 = usd_level.get(t, 0.0) - usd_level.get(b2, 0.0)
+            rs1 = rlvl[t] - rlvl[b1]
+            if idx >= wz:
+                window = [rlvl[times[j]] for j in range(idx - wz, idx + 1)]
                 m = sum(window) / len(window)
-                sz = (rlvl[d] - m) / (_std(window) or 1e-9)
+                sz = (rlvl[t] - m) / (_std(window) or 1e-9)
             else:
                 sz = 0.0
-            feats[d] = [um20, um60, rs20, sz]
+            feats[t] = [um1, um2, rs1, sz]
         ctx[sym] = feats
     return ctx
 
@@ -1454,7 +1474,7 @@ def _ml_features(candles, closes, i, side, ctx=None):
     dow = _pt(candles[i]["time"]).weekday()
     xp = [0.0, 0.0, 0.0, 0.0]
     if ctx is not None:
-        xp = ctx.get(_pt(candles[i]["time"]).date(), xp)
+        xp = ctx.get(candles[i]["time"], xp)
 
     def lr(k):
         return math.log(closes[i] / closes[i - k]) if i - k >= 0 and closes[i - k] > 0 else 0.0
@@ -1501,12 +1521,11 @@ def _ml_dataset(candles, closes, cfg, tp_mult, tstop, cand_fn=_cand_meanrev, ctx
     return X, y, pnl, times
 
 
-def _ml_fit(candles, closes, cfg, train_end, cand_fn=_cand_meanrev, ctx=None):
+def _ml_fit(candles, closes, cfg, train_end, cand_fn=_cand_meanrev, ctx=None, tstop=20):
     """Fit the gradient-boosting gate on candidates BEFORE train_end. Pick tp_mult
     and probability threshold on the last training year (validation), then refit on
     all pre-train_end data. Returns (model, tp_mult, thr, n_train, val_net) or None."""
     from sklearn.ensemble import GradientBoostingClassifier
-    tstop = 20
     val_start = train_end - timedelta(days=365)
     best = None
     for tp_mult in (1.0, 1.5, 2.0, 3.0):
@@ -1594,7 +1613,7 @@ def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, t
     return trades
 
 
-def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None):
+def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None, tstop=20):
     """ML-gated mean-reversion sleeve (the walk-forward winner). A trend/breakout
     sleeve was tested but hurt robustness without a stop loss (added tail risk in
     choppy years), so it is disabled by default. NO stop loss; time-stop exit."""
@@ -1602,14 +1621,14 @@ def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None):
     all_trades, sleeves = [], {}
     for name, cand_fn in (("meanrev", _cand_meanrev),):
         try:
-            fit = _ml_fit(candles, closes, cfg, test_start, cand_fn, ctx)
+            fit = _ml_fit(candles, closes, cfg, test_start, cand_fn, ctx, tstop)
         except Exception:
             logger.exception("ml sleeve %s fit failed", name)
             fit = None
         if fit is None:
             continue
         model, tp_mult, thr, n_train, val_net = fit
-        trs = _ml_generate(candles, closes, cfg, model, tp_mult, thr, 20, test_start, test_end, cand_fn, ctx)
+        trs = _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, test_end, cand_fn, ctx)
         for t in trs:
             t["sleeve"] = name
         all_trades.extend(trs)
@@ -1619,7 +1638,7 @@ def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None):
         return None
     mr = sleeves.get("meanrev", {})
     info = {"label": "ML mean-reversion (gradient boosting)", "entry": "ml_meanrev",
-            "time_stop": 20, "sleeves": sleeves,
+            "time_stop": tstop, "sleeves": sleeves,
             "tp_atr": mr.get("tp_atr"), "threshold": mr.get("threshold"),
             "train_candidates": sum(s["train_candidates"] for s in sleeves.values())}
     return all_trades, info
@@ -1670,13 +1689,14 @@ def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurren
                         lot_per_10k, max_concurrent, real_syms, sim_syms, "nosl_ml")
 
 
-def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurrent):
+def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurrent,
+                            tstop=20, xctx=None, min_bars=300):
     """Multi-year walk-forward: for each test year Y, retrain the ML gate ONLY on
     data before Jan 1 of Y (validation on Y-1), then trade Y out-of-sample. Balance
-    resets to start_balance each year so per-year results are directly comparable."""
+    resets to start_balance each year so per-year results are directly comparable.
+    tstop is the time-stop in bars (20 for D1, ~120 for H4); xctx optionally supplies
+    cross-pair features per symbol; both must match the timeframe of `data`."""
     per_year, real_syms_all, sim_syms_all = [], set(), set()
-    # NOTE: cross-pair features were tested here and hurt out-of-sample (overfitting
-    # on limited data), so the model is fed no cross-pair context (ctx=None).
     for Y in years:
         test_start = datetime(Y, 1, 1, tzinfo=timezone.utc)
         test_end = datetime(Y + 1, 1, 1, tzinfo=timezone.utc)
@@ -1684,7 +1704,7 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
         price_on, all_dates, sym_strategy = {}, set(), {}
         year_real, year_sim = [], []
         for sym, (candles, source) in data.items():
-            if not candles or len(candles) < 300:
+            if not candles or len(candles) < min_bars:
                 continue
             cfg = dict(INSTRUMENTS[sym]); cfg["_sym"] = sym
             # need training history before the test year
@@ -1692,7 +1712,8 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
                 continue
             (year_real if source == "real" else year_sim).append(sym)
             try:
-                picked = _ml_ensemble_trades(candles, cfg, test_start, test_end, None)
+                picked = _ml_ensemble_trades(candles, cfg, test_start, test_end,
+                                             xctx.get(sym) if xctx else None, tstop)
             except Exception:
                 logger.exception("wf ensemble %s %s failed", sym, Y)
                 picked = None
@@ -2189,6 +2210,23 @@ async def _get_d1_history(symbol: str, want: int):
         _d1_cache[key] = (now, real)
         return real, "real"
     candles, _ = generate_candles(symbol, "D1", want)
+    return candles, "simulated"
+
+
+_h4_cache = {}
+
+
+async def _get_h4_history(symbol: str, want: int):
+    key = symbol
+    now = time.time()
+    hit = _h4_cache.get(key)
+    if hit and (now - hit[0]) < 900 and len(hit[1]) >= want * 0.85:
+        return hit[1], "real"
+    real = await metaapi_service.fetch_candles(symbol, "H4", want)
+    if real and len(real) >= 1500:
+        _h4_cache[key] = (now, real)
+        return real, "real"
+    candles, _ = generate_candles(symbol, "H4", want)
     return candles, "simulated"
 
 

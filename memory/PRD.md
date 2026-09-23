@@ -115,6 +115,22 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - DECISIONE: REVERT completo. Il default resta mean-reversion ML SENZA cross-pair (ctx=None). `_build_xpair_context` e il plumbing `ctx` restano nel codice ma DISABILITATI. Baseline confermato invariato (2026 nosl smoke: +6,6%, 5/5 reali, label "ML mean-reversion (gradient boosting)").
 - LEZIONE (dead-end): su questo dataset piccolo, aggiungere feature peggiora. Non riproporre cross-pair/ensemble/più-feature senza prima ridurre l'overfitting (es. regularizzazione, più dati intraday, feature selection).
 
+## TENTATIVO 4 — Intraday H4 (più dati di training): RIUSCITO ✅ (2026-06)
+- Richiesta utente: "aggiungere timeframe più brevi H1/H4 per aumentare gli esempi e ridurre l'overfitting delle feature macro."
+- Vincolo: fetcher MetaApi pagina all'indietro con tetto 12 pagine (~12k candele). H1 (24k+ su anni) NON fattibile; H4 (~9k su 6 anni) fattibile → scelto H4.
+- Implementato: `_get_h4_history` (+`_h4_cache`, TTL 900s), `_build_xpair_context` riscritto per chiave = timestamp raw (funziona su qualsiasi TF) con finestre parametriche (w1,w2,wz), `tstop` parametrizzato in tutta la pipeline ML (D1=20 barre, H4=120 barre ≈ 4 settimane). `MlWalkForwardReq` + `_run_ml_wf` estesi con `timeframe` ("D1"|"H4") e `cross_pair` (bool). `_ml_walkforward_compute(..., tstop, xctx, min_bars)`.
+- CONFRONTO WALK-FORWARD REALE (5/5 forex, no-SL, 0,1/€10k):
+  | Config | Anni+ | Media/anno | Composta | 2024 | Peggior DD |
+  |---|---|---|---|---|---|
+  | D1 baseline (no xpair) | 3/4 | +8,82% | +34,8% | -15,4% | 16,4% |
+  | D1 + cross-pair | 1/4 | -2,18% | -9,4% | -10,1% | 20,8% |
+  | H4 + cross-pair | 2/4 | +4,08% | +13,4% | +7,2% | 21,2% |
+  | **H4 SENZA cross-pair** ✅ | **4/4** | **+10,85%** | **+47,7%** | **+5,9%** | 21,1% |
+  - Dettaglio H4 no-xpair: 2023 +1,8% · 2024 +5,9% · 2025 +31,5% · 2026 +4,2%.
+- SCOPERTA: a vincere è l'H4 (più esempi ~5×), NON le feature cross-pair (che danneggiano su D1 e H4). L'H4 rende il 2024 positivo e TUTTI e 4 gli anni in profitto per la prima volta, con resa composta massima. Trade-off onesto: drawdown più alto (~21% vs 16%, più trade).
+- SPEDITO: frontend `wf-panel` ora lancia il walk-forward su H4 (cross_pair=false); poll esteso (220 tick) per il calcolo più lungo (~qualche minuto); label "intraday H4". Cross-pair resta disabilitato (codice conservato). Il pulsante nosl single-year dashboard resta su D1 per velocità.
+- ONESTÀ: backtest storico; H4 dà più dati ma non garantisce il futuro; DD più alto. Nessuna garanzia.
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.
