@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import api from "@/lib/api";
 import Header from "@/components/Header";
 import AutoTrader from "@/components/AutoTrader";
+import InstallPWA from "@/components/InstallPWA";
 
 export default function Dashboard() {
   const [bot, setBot] = useState(null);
@@ -30,6 +31,8 @@ export default function Dashboard() {
           </div>
           <span className="overline">Conto Demo · combo D1 auto</span>
         </div>
+
+        <div className="mb-3 flex justify-end"><InstallPWA /></div>
 
         <AutoTrader />
       </main>

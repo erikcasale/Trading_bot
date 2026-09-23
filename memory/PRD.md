@@ -280,6 +280,14 @@ Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezza
 - Frontend `AutoTrader.jsx`: card strategia aggiornata (direzione netta, frequenza 1×/giorno, stato Telegram); handler linkTelegram/testTelegram. Backend agent-tested via API live; frontend compila (Compiled successfully) — i nuovi pulsanti non ri-testati E2E in-browser ma verificati a livello API.
 - Stato: bot ATTIVO con ~9 posizioni demo (alcuni hedge legacy pre-direzione-netta ancora aperti; i nuovi cicli non ne aprono più).
 
+## PWA — App installabile su Android (2026-06): RIUSCITO ✅
+- Richiesta utente: "dammi l'apk per installare su android" → chiarito che l'app è web (Emergent non converte web→APK nativo, serve progetto Mobile separato); l'utente ha scelto la **PWA installabile**.
+- Implementato: `public/manifest.json` (name/short_name, display standalone, theme #080B10, icone 192/512 maskable, orientation portrait), `public/service-worker.js` (network-first per navigazioni, mai cache di `/api`), registrazione SW in `src/index.js`, meta PWA + apple-touch-icon + title in `public/index.html`. Icona generata (Gemini) e ridimensionata a icon-192/512/apple-touch/favicon.
+- `InstallPWA.jsx`: pulsante "Installa app" (su evento beforeinstallprompt Android) + hint iOS "Condividi → Aggiungi a Home"; nasconde se già in standalone. Renderizzato in Dashboard.
+- Verificato via curl sul preview URL: manifest.json 200, service-worker.js 200 (application/javascript), icon-192.png 200 (image/png). Frontend Compiled successfully.
+- Accesso invariato: JWT, account demo demo@apexflow.io / apexflow2026 + pulsante "Entra con Account Demo"; token in localStorage → login persistente nella PWA.
+- NOTA: per un'installazione permanente/always-on conviene usare l'URL DEPLOYATO (il preview è ambiente di sviluppo). Il backend/bot gira solo mentre l'ambiente è attivo.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).

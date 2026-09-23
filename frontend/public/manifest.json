@@ -1,0 +1,26 @@
+{
+  "short_name": "Apex Flow",
+  "name": "Apex Flow — Auto-Trader MT5",
+  "description": "Terminale di auto-trading combo D1 su conto Tickmill MT5 demo via MetaApi.",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "id": "/",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#080B10",
+  "background_color": "#080B10"
+}
