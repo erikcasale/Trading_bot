@@ -1,0 +1,28 @@
+{
+  "summary": "Frontend cockpit verified end-to-end. Demo login succeeds and lands on Dashboard which renders ONLY the Auto-Trader cockpit (Header + AutoTrader). All required data-testid selectors present: autobot-cockpit, autobot-state, autobot-connection (Connesso), autobot-equity (€9,996.70), autobot-open-pnl (+€0.00), autobot-open-count (0/10), autobot-last-run (23/09, 07:01), autobot-next-run, autobot-open-section/table/empty, autobot-closed-section/table (shows 1 EUR/USD BUY closed trade with -€0.17 P&L). START flow: clicking autobot-start-button triggered a window.confirm which was accepted; state badge flipped FERMO → ATTIVO; autobot-stop-button and autobot-runnow-button appeared; autobot-log-toggle expanded showing 'Bot AVVIATO — valutazione segnali in corso' log entry. STOP flow: autobot-stop-button clicked; final screenshots confirm state returned to FERMO with 'Avvia bot' button visible — bot left in STOPPED state as required. Mobile viewport (390x844): no horizontal overflow (scrollWidth == clientWidth == 390). Old research panels (Confronta pesi, walk-forward, Discovery, Watchlist, AI, candle chart) are all absent. The word 'backtest' appears only in the footer disclaimer (informational), not as a panel.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "LoginPage demo button", "issue": "data-testid=\"demo-login-button\" is missing on the 'Entra con Account Demo ($100.000)' button. Test succeeded via text fallback, but for robust automation the testid should be added.", "selector": "button:has-text('Entra con Account Demo')", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "(Optional/low) Add data-testid=\"demo-login-button\" to the demo login button on /login so future tests can select it deterministically.",
+    "(Informational) Activity log shows previous 'Ordine <PAIR> BUY/SELL fallito: Validation failed' entries for GBP/CHF, EUR/CHF, EUR/GBP, AUD/USD, USD/CHF, GBP/USD. Main agent may want to investigate MetaApi order-validation for these symbols on the Tickmill demo (possibly volume/symbol formatting) — not blocking for this cleanup task."
+  ],
+  "critical_code_review_comments": [
+    "Dashboard.jsx correctly reduced to Header + AutoTrader only — cleanup goal achieved.",
+    "AutoTrader.jsx polling GET /autobot every 5s works and populates all fields; connection reads 'Connesso' as expected.",
+    "window.confirm on start is honoured and dialog handler acceptance flips state correctly."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (not tested per request)", "frontend": "100%"},
+  "test_credentials": "demo@apexflow.io / apexflow2026 (also demo-login button)",
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Bot left in STOPPED (FERMO) state at end of test. One closed EUR/USD BUY trade (-€0.17) is present in the closed-trades table from prior main-agent activity. If START is clicked during a re-test, the signal cycle can take up to ~4 minutes — do NOT wait; just verify ATTIVO state and log entry, then STOP. Demo login button lacks data-testid; use text 'Entra con Account Demo' fallback."
+}

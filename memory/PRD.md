@@ -255,6 +255,23 @@ Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezza
 - Verifica: backend agent-tested via API (12 REAL, SIM vuoto); frontend testing-agent iteration 13 (100%, nessun bug), login demo OK, tabelle+CSV OK.
 - ONESTÀ (fondamentale): scegliere il peso "migliore" sullo storico è UN'ALTRA ottimizzazione → selection bias/overfitting possibile. Le rese composte alte derivano dal compounding annuale su dati passati. Resta un backtest storico, nessuna garanzia futura, no-SL sempre senza protezione di prezzo.
 
+## OPERATIVITÀ — Auto-Trading su MT5 Demo + UI ripulita (2026-06): RIUSCITO ✅
+- Richiesta utente: "rimuoviamo le robe inutili... non serve un tasto/sezione per verificarla ormai... voglio vedere la lista dei trade aperti e una sezione di quelli chiusi... poi ci prepariamo per collegarla al account demo e far partire i trade in automatico su mt5". Scelte: rimuovere TUTTI i pannelli di ricerca/verifica, lasciare solo stato bot + trade aperti + trade chiusi; resto default.
+- **UI ripulita**: `Dashboard.jsx` ora renderizza SOLO `Header` + nuovo `AutoTrader.jsx`. Rimossi dalla dashboard: ForwardTest (backtest/walk-forward/sweep/discovery/intraday/no-SL), Watchlist, CandleChart, AiPanel, BotPanel, PositionsTable (i file restano ma non sono più usati).
+- **Motore auto-trading** (`server.py`): strategia fissa combo D1, slot 7 mean-rev / 3 forza, 12 coppie, max 10, NO stop di prezzo, TP ATR + time-stop 28g, sizing 0,1 lotti/€10k composto.
+  - `_live_signals(candles, cfg, sleeve_defs, ctx, tstop)`: valuta i segnali di ingresso sull'ULTIMA barra D1 completata (ML addestrato su tutta la storia precedente, no look-ahead).
+  - `_autobot_cycle()`: check connessione → time-stop posizioni apexflow oltre 28g → conta slot per sleeve → fetch 12 D1 reali + strength context → per ogni coppia valuta segnali → piazza ordini market reali (comment `apexflow_<sleeve>`) rispettando cap e dedup (symbol,sleeve). Log in Mongo `autobot`.
+  - `_autobot_loop()`: scheduler background (avviato allo startup) che esegue un ciclo ogni 6h quando `running`.
+  - Endpoint: `GET /api/autobot` (stato + strategia + account + trade aperti/chiusi reali + log), `POST /api/autobot/start` (avvia + ciclo immediato), `/stop`, `/run-now`, `POST /api/autobot/close/{pid}`.
+- **metaapi_service.py**: `place_market_order` con `comment` (rimosso `clientId` che violava il pattern MetaApi → causava "Validation failed"); `close_position(id)`; `get_closed_deals(days)` (deal DEAL_ENTRY_OUT con P&L realizzato); `get_positions` arricchito con id/comment/tp/time; SYMBOL_MAP esteso a tutte le 12 coppie strength.
+- **AutoTrader.jsx**: card controllo/stato (START/STOP con conferma, Valuta ora, stato ciclo, ultimo/prossimo ciclo, equity, P&L aperto, connessione), tabella trade aperti (con chiusura manuale), tabella trade chiusi (P&L realizzato), registro attività collassabile. Tutti i data-testid `autobot-*`.
+- **VERIFICATO LIVE (conto Tickmill MT5 demo reale, MetaApi CONNESSO)**:
+  - Ordine test manuale piazzato → aperto → chiuso via `/autobot/close` → apparso in trade chiusi (P&L reale). ✓
+  - Ciclo motore completo: **7 ordini reali piazzati** (0,1 lotti ciascuno) — 4 mean-rev (EUR/USD BUY, USD/CHF SELL, AUD/USD BUY, EUR/CHF BUY) + 3 forza (GBP/USD SELL, USD/CHF BUY, AUD/USD SELL), ognuno con TP, nessuno stop di prezzo, cap rispettati (forza a 3/3, meanrev 4/7). ✓
+  - Frontend testing-agent iteration 14: 100%, cockpit + tabelle + START/STOP + registro OK, nessun overflow mobile, pannelli di ricerca assenti. ✓
+- NOTA: due sleeve indipendenti possono aprire posizioni OPPOSTE sullo stesso simbolo (es. USD/CHF meanrev SELL + strength BUY) — è coerente col backtest combo (che fonde entrambi gli sleeve). Il bot resta ATTIVO con le 7 posizioni; l'utente controlla via pulsante Ferma bot / Chiudi.
+- ONESTÀ: esecuzione reale su conto DEMO; nessuno stop di prezzo (solo TP + time-stop + cap). I risultati storici non garantiscono profitti futuri.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).
