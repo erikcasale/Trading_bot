@@ -141,6 +141,23 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - INSIGHT per il futuro: strength vince dove mean-reversion perde (2024) e viceversa → potenzialmente COMPLEMENTARI. Una combinazione (portfolio dei due motori) potrebbe dare 4/4 con DD più basso. Non ancora costruita.
 - LEZIONE (dead-end): sempre verificare `simulated_symbols` vuoto prima di credere a un risultato; i dati simulati gonfiano di ~6× (98% vs 17%).
 
+## TENTATIVO 6 — COMBINAZIONE motori (mean-reversion + forza) + forza su H4 (2026-06): CAMPIONE ✅
+- Richiesta utente: "forza su H4" + "combinare mean-reversion + forza in un portafoglio unico per 4/4 anni con meno drawdown".
+- Implementato: `_ml_ensemble_trades(..., sleeve_defs=[(name,cand_fn)])` multi-sleeve (unisce più motori in un unico stream di trade, capitale/compounding/cap condivisi). `_ml_walkforward_compute(..., mode)` con mode "meanrev"|"strength"|"combo". `MlWalkForwardReq.mode`. Combo = mean-reversion + forza valutaria su 12 coppie reali.
+- CONFRONTO COMPLETO (walk-forward reale 2023-2026, no-SL, 0,1/€10k):
+  | Config | Anni+ | Media/anno | Composta | peggior anno | DD |
+  |---|---|---|---|---|---|
+  | D1 mean-rev baseline | 3/4 | +8,82% | +34,8% | -15,4% | 16,4% |
+  | D1 + cross-pair feat | 1/4 | -2,18% | -9,4% | | 20,8% |
+  | H4 mean-rev | 4/4 | +10,85% | +47,7% | +1,8% | 21,1% |
+  | D1 strength | 2/4 | +4,40% | +17,0% | -3,8% | 30,5% |
+  | **D1 COMBO** ✅ | **4/4** | **+15,35%** | **+76,1%** | **+6,5%** | 29,0% |
+  | H4 combo | 3/4 | +9,62% | +41,6% | -1,2% | 34,0% |
+  - D1 combo dettaglio: 2023 +22,1% · 2024 +18,6% · 2025 +6,5% · 2026 +14,2%.
+- SCOPERTA: i due motori sono COMPLEMENTARI (forza vince il 2024, mean-reversion gli altri anni) → la combinazione D1 dà il miglior risultato assoluto: 4/4 positivi, +76,1% composto, anche risk-adjusted (76/29=2,6 vs H4 47,7/21=2,3). L'H4 aiuta SOLO il mean-reversion puro (più esempi), ma sulla combo/forza aggiunge solo rumore (troppi trade, DD 34%, meno consistente) → H4-combo BOCCIATO.
+- SPEDITO: frontend `wf-panel` ora lancia mode="combo" su D1 (12 coppie); label "combo (mean-reversion + forza valutaria)". Il campione è il D1 combo.
+- ONESTÀ: backtest storico su dati reali; DD alto (29%, molti trade senza SL); nessuna garanzia futura. `mode` "strength"/"combo" e "meanrev", timeframe D1/H4 restano disponibili via API per confronto.
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.

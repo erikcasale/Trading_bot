@@ -1009,7 +1009,8 @@ class MlWalkForwardReq(BaseModel):
     max_concurrent: int = 10
     timeframe: str = "D1"       # "D1" | "H4"
     cross_pair: bool = False    # add dollar-strength + relative-value features
-    strength: bool = False      # trade currency-strength divergence on an expanded cross universe
+    strength: bool = False      # legacy flag → mode="strength"
+    mode: str = "meanrev"       # "meanrev" | "strength" | "combo"
 
 
 @api_router.post("/portfolio/ml_walkforward")
@@ -1037,7 +1038,11 @@ async def _run_ml_wf(job_id, body):
             tstop, min_bars = 20, 300
             xwin = (20, 60, 60)
         data = {}
-        universe = STRENGTH_SYMBOLS if body.strength else FOREX_SYMBOLS
+        mode = body.mode if body.mode in ("meanrev", "strength", "combo") else "meanrev"
+        if body.strength and mode == "meanrev":
+            mode = "strength"
+        needs_strength = mode in ("strength", "combo")
+        universe = STRENGTH_SYMBOLS if needs_strength else FOREX_SYMBOLS
         _portfolio_jobs[job_id]["total"] = len(universe)
         for sym in universe:
             candles, source = await fetch(sym, want)
@@ -1047,7 +1052,7 @@ async def _run_ml_wf(job_id, body):
             candles, source = await fetch(sym, want)
             if source == "real":
                 data[sym] = (candles, source)
-        if body.strength:
+        if needs_strength:
             # honesty: currency-strength must use ONLY real data — drop any pair that
             # fell back to simulated instead of mixing fake prices into the meter.
             data = {s: v for s, v in data.items() if v[1] == "real"}
@@ -1059,20 +1064,20 @@ async def _run_ml_wf(job_id, body):
         if body.cross_pair:
             xctx = await asyncio.to_thread(_build_xpair_context, data, xwin[0], xwin[1], xwin[2])
         sctx = None
-        if body.strength:
+        if needs_strength:
             kwin = xwin[0]  # momentum window in bars for the strength meter
             sctx = await asyncio.to_thread(_build_strength_context, data, kwin, xwin[2])
         years = sorted({int(y) for y in body.years})
         result = await asyncio.to_thread(_ml_walkforward_compute, data, years,
                                          body.start_balance, body.lot_per_10k, body.max_concurrent,
-                                         tstop, xctx, min_bars, sctx)
+                                         tstop, xctx, min_bars, sctx, mode)
         if result is None:
             _portfolio_jobs[job_id] = {"status": "error", "result": None,
                                        "error": "Nessun edge appreso / storico insufficiente"}
             return
         result["timeframe"] = body.timeframe.upper()
         result["cross_pair"] = body.cross_pair
-        result["strength"] = body.strength
+        result["mode"] = mode
         result["time_stop_bars"] = tstop
         _portfolio_jobs[job_id] = {"status": "done", "result": result, "error": None}
     except Exception as e:
@@ -1715,13 +1720,15 @@ def _ml_generate(candles, closes, cfg, model, tp_mult, thr, tstop, test_start, t
     return trades
 
 
-def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None, tstop=20, cand_fn=None):
-    """ML-gated entry sleeve (mean-reversion by default). NO stop loss; time-stop exit.
-    A custom cand_fn (e.g. currency-strength divergence) can be supplied."""
+def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None, tstop=20, sleeve_defs=None):
+    """ML-gated entry sleeves. NO stop loss; time-stop exit. sleeve_defs is a list of
+    (name, cand_fn); multiple sleeves are merged into one trade stream (e.g. combining
+    mean-reversion with currency-strength divergence)."""
     closes = [c["c"] for c in candles]
     all_trades, sleeves = [], {}
-    sleeve_name = "strength" if cand_fn is not None else "meanrev"
-    for name, cfn in ((sleeve_name, cand_fn or _cand_meanrev),):
+    if sleeve_defs is None:
+        sleeve_defs = [("meanrev", _cand_meanrev)]
+    for name, cfn in sleeve_defs:
         try:
             fit = _ml_fit(candles, closes, cfg, test_start, cfn, ctx, tstop)
         except Exception:
@@ -1739,8 +1746,13 @@ def _ml_ensemble_trades(candles, cfg, test_start, test_end=None, ctx=None, tstop
     if not all_trades:
         return None
     mr = sleeves.get("meanrev") or sleeves.get("strength") or {}
-    lbl = "ML currency-strength cross" if "strength" in sleeves else "ML mean-reversion (gradient boosting)"
-    info = {"label": lbl, "entry": "strength" if "strength" in sleeves else "ml_meanrev",
+    if "meanrev" in sleeves and "strength" in sleeves:
+        lbl = "ML combo (mean-reversion + forza)"
+    elif "strength" in sleeves:
+        lbl = "ML currency-strength cross"
+    else:
+        lbl = "ML mean-reversion (gradient boosting)"
+    info = {"label": lbl, "entry": "+".join(sleeves.keys()),
             "time_stop": tstop, "sleeves": sleeves,
             "tp_atr": mr.get("tp_atr"), "threshold": mr.get("threshold"),
             "train_candidates": sum(s["train_candidates"] for s in sleeves.values())}
@@ -1793,12 +1805,11 @@ def _nosl_ml_compute(data, start_date, start_balance, lot_per_10k, max_concurren
 
 
 def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurrent,
-                            tstop=20, xctx=None, min_bars=300, sctx=None):
+                            tstop=20, xctx=None, min_bars=300, sctx=None, mode="meanrev"):
     """Multi-year walk-forward: for each test year Y, retrain the ML gate ONLY on
     data before Jan 1 of Y (validation on Y-1), then trade Y out-of-sample. Balance
     resets to start_balance each year so per-year results are directly comparable.
-    tstop is the time-stop in bars (20 for D1, ~120 for H4); xctx optionally supplies
-    cross-pair features per symbol; both must match the timeframe of `data`."""
+    mode: "meanrev" | "strength" | "combo" (mean-reversion + currency-strength)."""
     per_year, real_syms_all, sim_syms_all = [], set(), set()
     for Y in years:
         test_start = datetime(Y, 1, 1, tzinfo=timezone.utc)
@@ -1814,10 +1825,20 @@ def _ml_walkforward_compute(data, years, start_balance, lot_per_10k, max_concurr
             if _pt(candles[0]["time"]) >= test_start - timedelta(days=400):
                 continue
             (year_real if source == "real" else year_sim).append(sym)
-            cand_fn = _make_strength_cand(sctx[sym]) if (sctx and sym in sctx) else None
+            strength_cand = _make_strength_cand(sctx[sym]) if (sctx and sym in sctx) else None
+            if mode == "strength":
+                sleeve_defs = [("strength", strength_cand)] if strength_cand else None
+            elif mode == "combo":
+                sleeve_defs = [("meanrev", _cand_meanrev)]
+                if strength_cand:
+                    sleeve_defs.append(("strength", strength_cand))
+            else:
+                sleeve_defs = [("meanrev", _cand_meanrev)]
+            if sleeve_defs is None:
+                continue
             try:
                 picked = _ml_ensemble_trades(candles, cfg, test_start, test_end,
-                                             xctx.get(sym) if xctx else None, tstop, cand_fn)
+                                             xctx.get(sym) if xctx else None, tstop, sleeve_defs)
             except Exception:
                 logger.exception("wf ensemble %s %s failed", sym, Y)
                 picked = None

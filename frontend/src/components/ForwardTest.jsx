@@ -113,7 +113,7 @@ export default function ForwardTest({ symbol }) {
     if (wfPoll.current) clearInterval(wfPoll.current);
     setWf(null); setWfState({ loading: true, done: 0, total: 5 });
     try {
-      const { data } = await api.post("/portfolio/ml_walkforward", { years: [2023, 2024, 2025, 2026], start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10, timeframe: "H4", cross_pair: false });
+      const { data } = await api.post("/portfolio/ml_walkforward", { years: [2023, 2024, 2025, 2026], start_balance: 10000, lot_per_10k: 0.1, max_concurrent: 10, timeframe: "D1", mode: "combo" });
       const jobId = data.job_id;
       let ticks = 0;
       wfPoll.current = setInterval(async () => {
@@ -510,7 +510,7 @@ export default function ForwardTest({ symbol }) {
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#0EA5E9]" />
             <span className="font-head font-bold text-sm">Walk-Forward pluriennale (robustezza ML)</span>
-            <span className="overline">intraday H4 · riaddestra ogni anno · testa 2023 → 2026 · reset €10k/anno</span>
+            <span className="overline">combo (mean-reversion + forza valutaria) · 12 coppie · riaddestra ogni anno · 2023→2026 · reset €10k</span>
           </div>
           <button data-testid="wf-run-button" onClick={runWf} disabled={wfState.loading}
             className="inline-flex items-center gap-1.5 bg-[#0EA5E9] hover:bg-[#0284C7] text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60">
@@ -519,7 +519,7 @@ export default function ForwardTest({ symbol }) {
           </button>
         </div>
         <p className="mt-2 text-[11px] text-[#94A3B8] leading-relaxed">
-          Per ogni anno il modello è <b className="text-white">riaddestrato solo sui dati precedenti</b> (validazione sull'anno prima) e testato su quell'anno mai visto. Usa candele <b className="text-white">H4 (intraday)</b>: ~5× più esempi di training del daily → meno overfitting e anni più consistenti. Serve a capire se l'edge <b className="text-white">regge nel tempo</b>. Nessuno stop loss, size composta 0,1/€10k. <b className="text-[#F59E0B]">Il calcolo richiede qualche minuto</b> (scarica e addestra su molti dati).
+          Per ogni anno il modello è <b className="text-white">riaddestrato solo sui dati precedenti</b> (validazione sull'anno prima) e testato su quell'anno mai visto. Combina due motori complementari: <b className="text-white">mean-reversion</b> (forte negli anni calmi) + <b className="text-white">forza valutaria</b> (forte negli anni di trend, es. 2024), su 12 coppie. Serve a capire se l'edge <b className="text-white">regge nel tempo</b>. Nessuno stop loss, size composta 0,1/€10k. <b className="text-[#F59E0B]">Il calcolo richiede qualche minuto.</b>
         </p>
 
         {wf && (
