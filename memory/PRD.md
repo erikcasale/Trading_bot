@@ -303,6 +303,8 @@ Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezza
 - Aggiornamenti: sviluppo su Emergent → "Save to GitHub" → sul VPS `./deploy/update.sh` (i dati Atlas e le posizioni aperte restano).
 - Verifiche statiche (Docker non disponibile in questo ambiente, la build gira sul VPS): nomi env combaciano col codice (MONGO_URL/DB_NAME/JWT_SECRET/ADMIN_*/METAAPI_* obbligatori tutti presenti); target `server:app` esiste (server.py:33); `/api` incluso; frontend same-origin; compose YAML valido; `deploy/.env` in .gitignore.
 
+- `deploy/README.md` aggiornato (2026-06) per **Oracle Cloud Always Free** come server di TEST (istanza ARM Ampere A1 VM.Standard.A1.Flex, Ubuntu 24.04) con il doppio-firewall Oracle documentato (Security List cloud + iptables interne su porte 80/443 — il gotcha classico), Docker con aggiunta al gruppo docker (SSH come utente `ubuntu`), e sezione migrazione Oracle→Hetzner CAX11 per il passaggio a conto reale. Immagini Docker multi-arch → funzionano identiche su ARM. DB su Atlas → nessuna perdita dati alla migrazione.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).
