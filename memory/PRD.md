@@ -107,6 +107,14 @@ Richiesta: "togliamo SL, size 0.1 lotti ogni €10k (0.11 su 11k…), interesse 
 - Il default engine ("ml") ora usa questa config migliorata. Label strategia: "ML mean-reversion (gradient boosting)".
 - ONESTÀ: il 2024 resta -15,4% (senza SL un anno storto non si elimina). Miglioramento reale e out-of-sample, non overfitting (TP scelto su validazione). L'ensemble trend è stato testato e scartato: è questo il valore del test reale vs il solo suggerire idee.
 
+## TENTATIVO 3 — Feature cross-coppie (forza dollaro + spread): BOCCIATO (2026-06)
+- Richiesta utente: "inserire forza del dollaro e spread tra coppie per migliorare anni negativi come il 2024."
+- Implementato `_build_xpair_context(data)`: forza del dollaro (momentum 20/60g dal paniere sign-adjusted delle 5 coppie), forza idiosincratica del pair vs fattore dollaro, e z-score di stretch relative-value (60g). 4 feature aggiunte, threaded via `ctx` in `_ml_features/_ml_dataset/_ml_fit/_ml_generate/_ml_ensemble_trades`. Nessun look-ahead (feature al giorno d usano solo dati ≤ d).
+- RISULTATO walk-forward reale 5/5: 1/4 anni positivi, media -2,18%/anno, composta -9,4%, peggior DD 20,8%. 2023 -1,5%, 2024 -10,1% (leggero meglio), 2025 -6,2% (CROLLO da +23,5%), 2026 +9,1%.
+- CAUSA: con ~180 candidati/anno di training, 4 feature macro in più hanno aumentato l'overfitting e diluito il segnale mean-reversion; il modello si aggrappa a pattern macro spuri che non generalizzano.
+- DECISIONE: REVERT completo. Il default resta mean-reversion ML SENZA cross-pair (ctx=None). `_build_xpair_context` e il plumbing `ctx` restano nel codice ma DISABILITATI. Baseline confermato invariato (2026 nosl smoke: +6,6%, 5/5 reali, label "ML mean-reversion (gradient boosting)").
+- LEZIONE (dead-end): su questo dataset piccolo, aggiungere feature peggiora. Non riproporre cross-pair/ensemble/più-feature senza prima ridurre l'overfitting (es. regularizzazione, più dati intraday, feature selection).
+
 ## Walk-forward annuale + export CSV (2026-09-22) — iterazione 11 (walk-forward 6/6, CSV ok, frontend 100%)
 - **Walk-Forward Annuale**: `PortfolioReq.walk_forward` (default True). In `_portfolio_compute`, per ogni anno del periodo la strategia di ciascuno strumento è riaddestrata usando SOLO i dati precedenti a quell'anno (helper `_pick_params`, grid ridotta 96 combo), poi applicata su quell'anno. `per_symbol.retrains` conta i riaddestramenti (>=2 per 2025+2026); label "Misto (walk-forward)" se la strategia cambia tra gli anni. `walk_forward:false` = training unico pre-2025 (retrains=1).
 - **Export CSV**: il result include la lista completa `trades` (entry_date, exit_date, symbol, side, result, r, net). Frontend `exportPortfolioCsv()` scarica un CSV multi-sezione (riepilogo + statistiche per strumento + trade + equity curve), nome `apexflow_portfolio_<start>_<end>.csv`.
