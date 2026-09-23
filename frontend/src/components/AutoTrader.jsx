@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square, Loader2, RefreshCw, Bot, Wifi, WifiOff, Clock, TrendingUp, TrendingDown, X, Activity, ChevronDown, AlertTriangle, Layers, ShieldOff } from "lucide-react";
+import { Play, Square, Loader2, RefreshCw, Bot, Wifi, WifiOff, Clock, TrendingUp, TrendingDown, X, Activity, ChevronDown, AlertTriangle, Layers, ShieldOff, Send } from "lucide-react";
 import api from "@/lib/api";
 import { toast } from "sonner";
 
@@ -50,6 +50,15 @@ export default function AutoTrader() {
     try { await api.post(`/autobot/close/${pid}`); toast.success(`Chiusura ${sym} inviata`); setTimeout(load, 1500); }
     catch (e) { toast.error(e?.response?.data?.detail || "Chiusura non riuscita"); }
   };
+  const linkTelegram = async () => {
+    setBusy(true);
+    try { const { data } = await api.post("/autobot/telegram/link"); toast.success(`Telegram collegato${data.name ? " a " + data.name : ""} — controlla il messaggio!`); await load(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Collegamento non riuscito"); } finally { setBusy(false); }
+  };
+  const testTelegram = async () => {
+    try { await api.post("/autobot/telegram/test"); toast.success("Messaggio di test inviato su Telegram"); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Invio non riuscito"); }
+  };
 
   if (!data) return (
     <div className="flex items-center justify-center py-24 text-[#64748B]" data-testid="autobot-loading">
@@ -58,6 +67,8 @@ export default function AutoTrader() {
   );
 
   const { running, strategy, connected, account, last_run, next_run, cycle_status } = data;
+  const tgOn = data.telegram;
+  const tgBot = data.telegram_bot;
   const cur = account?.currency || "EUR";
   const open = data.open_trades || [];
   const closed = data.closed_trades || [];
@@ -88,11 +99,28 @@ export default function AutoTrader() {
                 <span className="inline-flex items-center gap-1"><ShieldOff className="w-3 h-3 text-[#F59E0B]" />no stop di prezzo</span>
                 <span>slot {strategy?.caps?.meanrev} mean-rev / {strategy?.caps?.strength} forza</span>
                 <span>time-stop {strategy?.time_stop_days}g · {strategy?.lot_per_10k} lotti/€10k</span>
+                <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3 text-[#0EA5E9]" />{strategy?.check_frequency}</span>
+                {strategy?.net_direction && <span className="text-[#10B981]">direzione netta (no hedge)</span>}
+                <span className={`inline-flex items-center gap-1 ${data.telegram ? "text-[#0EA5E9]" : "text-[#475569]"}`}>
+                  <Send className="w-3 h-3" />{data.telegram ? "Telegram attivo" : "Telegram non configurato"}
+                </span>
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            {tgBot && !tgOn && (
+              <button data-testid="autobot-telegram-link" onClick={linkTelegram} disabled={busy}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-[#0EA5E9]/50 text-[#38BDF8] hover:bg-[#0EA5E9]/10 transition-colors disabled:opacity-50">
+                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}Collega Telegram
+              </button>
+            )}
+            {tgOn && (
+              <button data-testid="autobot-telegram-test" onClick={testTelegram}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-[#0EA5E9]/40 text-[#38BDF8] hover:bg-[#0EA5E9]/10 transition-colors">
+                <Send className="w-3.5 h-3.5" />Test Telegram
+              </button>
+            )}
             {running && (
               <button data-testid="autobot-runnow-button" onClick={runNow} disabled={busy || cycling}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-[#334155] text-[#94A3B8] hover:text-white hover:border-[#0EA5E9]/50 transition-colors disabled:opacity-50">

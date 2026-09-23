@@ -2739,19 +2739,57 @@ AUTOBOT_CAPS = {"meanrev": 7, "strength": 3}
 AUTOBOT_MAX = 10
 AUTOBOT_TSTOP_DAYS = 28          # ~20 D1 trading bars
 AUTOBOT_LOT_PER_10K = 0.1
-AUTOBOT_CYCLE_HOURS = 6
+AUTOBOT_DAILY_HOUR_UTC = 22       # evaluate once/day, after the forex D1 bar closes
 _autobot_lock = asyncio.Lock()
+
+
+def _next_daily_run(now):
+    slot = now.replace(hour=AUTOBOT_DAILY_HOUR_UTC, minute=0, second=0, microsecond=0)
+    if now >= slot:
+        slot = slot + timedelta(days=1)
+    return slot
 
 
 def _autobot_strategy():
     return {"name": "Combo D1 · 7 mean-rev / 3 forza valutaria", "timeframe": "D1",
             "pairs": len(STRENGTH_SYMBOLS), "caps": AUTOBOT_CAPS, "max_concurrent": AUTOBOT_MAX,
             "lot_per_10k": AUTOBOT_LOT_PER_10K, "time_stop_days": AUTOBOT_TSTOP_DAYS,
-            "stop_loss": None, "universe": STRENGTH_SYMBOLS}
+            "stop_loss": None, "net_direction": True,
+            "check_frequency": "1×/giorno alla chiusura D1", "universe": STRENGTH_SYMBOLS}
 
 
 def _sleeve_of(comment):
     return "strength" if "strength" in (comment or "") else "meanrev"
+
+
+async def _tg_chat_id():
+    chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if chat:
+        return chat
+    doc = await db.autobot.find_one({"_id": "engine"}, {"telegram_chat_id": 1})
+    return (doc or {}).get("telegram_chat_id")
+
+
+async def _tg_send(text):
+    """Fire-and-forget Telegram message (no-op if not configured)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = await _tg_chat_id()
+    if not token or not chat:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                              json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                    "disable_web_page_preview": True})
+    except Exception:
+        logger.warning("telegram send failed", exc_info=True)
+
+
+async def _notify_trade(action, symbol, side, lot, extra=""):
+    icon = "🟢" if action == "open" else ("🔴" if action == "close" else "⏱")
+    verb = {"open": "APERTO", "close": "CHIUSO", "timestop": "TIME-STOP"}.get(action, action.upper())
+    await _tg_send(f"{icon} <b>{verb}</b>\n{symbol} <b>{side}</b> · {lot} lotti\n{extra}\n<i>Apex Flow · MT5 demo</i>")
 
 
 async def _autobot_log(msg, err=None):
@@ -2788,15 +2826,16 @@ async def _autobot_cycle(trigger="scheduled"):
                     if r["ok"]:
                         closed += 1
                         await _autobot_log(f"Time-stop: chiusa {p['symbol']} {p['side']} dopo {(now - ot).days}g")
+                        await _notify_trade("timestop", p["symbol"], p["side"], p.get("volume"),
+                                            f"chiusa dopo {(now - ot).days} giorni")
             if closed:
                 positions = await metaapi_service.get_positions() or []
                 ours = [p for p in positions if (p.get("comment") or "").startswith("apexflow")]
             open_cnt = {"meanrev": 0, "strength": 0}
-            held = set()
+            held = set()   # broker symbols already held (one net position per symbol)
             for p in ours:
-                sl = _sleeve_of(p.get("comment"))
-                open_cnt[sl] = open_cnt.get(sl, 0) + 1
-                held.add((p["symbol"].replace("/", ""), sl))
+                open_cnt[_sleeve_of(p.get("comment"))] += 1
+                held.add(p["symbol"].replace("/", ""))
             total_open = len(ours)
 
             data = {}
@@ -2817,36 +2856,58 @@ async def _autobot_cycle(trigger="scheduled"):
                     sleeve_defs.append(("strength", strength_cand))
                 return _live_signals(candles, cfg, sleeve_defs, None, 20)
 
+            # 1) collect raw sleeve signals per symbol
+            raw = {}
             for sym, (candles, _s) in data.items():
                 try:
-                    sigs = await asyncio.to_thread(eval_sym, sym, candles)
+                    raw[sym] = await asyncio.to_thread(eval_sym, sym, candles)
                 except Exception:
                     logger.exception("autobot signal %s failed", sym)
-                    sigs = []
-                for s in sigs:
-                    sl = s["sleeve"]
-                    bkey = sym.replace("/", "")
-                    if (bkey, sl) in held or open_cnt.get(sl, 0) >= AUTOBOT_CAPS[sl] or total_open >= AUTOBOT_MAX:
-                        continue
-                    r = await metaapi_service.place_market_order(sym, s["side"], lot, sl=None,
-                                                                 tp=s["tp"], comment=f"apexflow_{sl}")
-                    if r["ok"]:
-                        placed.append({"symbol": sym, "side": s["side"], "sleeve": sl, "lot": lot, "tp": s["tp"]})
-                        open_cnt[sl] += 1; held.add((bkey, sl)); total_open += 1
-                        await _autobot_log(f"Aperta {sym} {s['side']} {lot} lotti [{sl}] TP {s['tp']}")
-                    else:
-                        await _autobot_log(f"Ordine {sym} {s['side']} fallito: {r.get('error')}", err=r.get("error"))
+                    raw[sym] = []
+
+            # 2) NET direction per symbol: opposite sleeve signals cancel out (save spread),
+            #    same-direction signals collapse into a single position.
+            net = []
+            for sym, sigs in raw.items():
+                if not sigs:
+                    continue
+                sides = {s["side"] for s in sigs}
+                if "BUY" in sides and "SELL" in sides:
+                    await _autobot_log(f"{sym}: segnali opposti (mean-rev vs forza) → annullati, nessun ordine")
+                    continue
+                side = sides.pop()
+                group = [s for s in sigs if s["side"] == side]
+                pick = next((g for g in group if g["sleeve"] == "meanrev"), group[0])  # meanrev owns the slot when both agree
+                names = "+".join(sorted({g["sleeve"] for g in group}))
+                net.append({"sym": sym, "side": side, "tp": pick["tp"], "sleeve": pick["sleeve"], "names": names})
+
+            # 3) place one order per symbol, respecting slot caps and total cap
+            for n in net:
+                bkey = n["sym"].replace("/", "")
+                sl = n["sleeve"]
+                if bkey in held or open_cnt.get(sl, 0) >= AUTOBOT_CAPS[sl] or total_open >= AUTOBOT_MAX:
+                    continue
+                r = await metaapi_service.place_market_order(n["sym"], n["side"], lot, sl=None,
+                                                             tp=n["tp"], comment=f"apexflow_{sl}")
+                if r["ok"]:
+                    placed.append({"symbol": n["sym"], "side": n["side"], "sleeve": sl, "lot": lot, "tp": n["tp"]})
+                    open_cnt[sl] += 1; held.add(bkey); total_open += 1
+                    await _autobot_log(f"Aperta {n['sym']} {n['side']} {lot} lotti [{n['names']}] TP {n['tp']}")
+                    await _notify_trade("open", n["sym"], n["side"], lot, f"motore: {n['names']} · TP {n['tp']} · no SL")
+                else:
+                    await _autobot_log(f"Ordine {n['sym']} {n['side']} fallito: {r.get('error')}", err=r.get("error"))
             await _autobot_log(f"Ciclo completato ({trigger}): {len(placed)} nuovi ordini · "
                                f"{closed} time-stop · {total_open} posizioni attive")
         except Exception as e:
             logger.exception("autobot cycle failed")
             await _autobot_log(f"Errore ciclo: {str(e)[:150]}", err=str(e)[:200])
         finally:
-            nxt = (datetime.now(timezone.utc) + timedelta(hours=AUTOBOT_CYCLE_HOURS)).isoformat()
+            now2 = datetime.now(timezone.utc)
             await db.autobot.update_one({"_id": "engine"},
                                         {"$set": {"cycle_status": "idle",
-                                                  "last_run": datetime.now(timezone.utc).isoformat(),
-                                                  "next_run": nxt}}, upsert=True)
+                                                  "last_run": now2.isoformat(),
+                                                  "last_run_date": now2.date().isoformat(),
+                                                  "next_run": _next_daily_run(now2).isoformat()}}, upsert=True)
 
 
 async def _autobot_loop():
@@ -2855,13 +2916,13 @@ async def _autobot_loop():
         try:
             doc = await db.autobot.find_one({"_id": "engine"}) or {}
             if doc.get("running") and not _autobot_lock.locked():
-                nr = doc.get("next_run")
-                due = (not nr) or (_pt(nr) <= datetime.now(timezone.utc))
-                if due:
+                now = datetime.now(timezone.utc)
+                # once per UTC day, only after the configured D1-close hour
+                if now.hour >= AUTOBOT_DAILY_HOUR_UTC and doc.get("last_run_date") != now.date().isoformat():
                     asyncio.create_task(_autobot_cycle("scheduled"))
         except Exception:
             logger.exception("autobot loop tick failed")
-        await asyncio.sleep(60)
+        await asyncio.sleep(120)
 
 
 @api_router.get("/autobot")
@@ -2876,6 +2937,8 @@ async def autobot_status(user: dict = Depends(get_current_user)):
         p["sleeve"] = _sleeve_of(p.get("comment"))
     return {"running": doc.get("running", False), "strategy": _autobot_strategy(),
             "connected": status.get("connected"), "broker": status, "account": account,
+            "telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and await _tg_chat_id()),
+            "telegram_bot": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
             "last_run": doc.get("last_run"), "next_run": doc.get("next_run"),
             "cycle_status": doc.get("cycle_status", "idle"), "last_error": doc.get("last_error"),
             "open_trades": ours, "closed_trades": closed or [],
@@ -2886,8 +2949,10 @@ async def autobot_status(user: dict = Depends(get_current_user)):
 async def autobot_start(user: dict = Depends(get_current_user)):
     await db.autobot.update_one({"_id": "engine"},
                                 {"$set": {"running": True, "strategy": _autobot_strategy(),
-                                          "next_run": datetime.now(timezone.utc).isoformat()}}, upsert=True)
+                                          "next_run": _next_daily_run(datetime.now(timezone.utc)).isoformat()}},
+                                upsert=True)
     await _autobot_log("Bot AVVIATO — valutazione segnali in corso")
+    await _tg_send("🚀 <b>Apex Flow avviato</b>\nCombo D1 · valutazione 1×/giorno · MT5 demo")
     asyncio.create_task(_autobot_cycle("start"))
     return {"running": True}
 
@@ -2896,6 +2961,7 @@ async def autobot_start(user: dict = Depends(get_current_user)):
 async def autobot_stop(user: dict = Depends(get_current_user)):
     await db.autobot.update_one({"_id": "engine"}, {"$set": {"running": False}}, upsert=True)
     await _autobot_log("Bot FERMATO — nessun nuovo ordine (le posizioni aperte restano)")
+    await _tg_send("🛑 <b>Apex Flow fermato</b>\nNessun nuovo ordine (le posizioni aperte restano)")
     return {"running": False}
 
 
@@ -2908,11 +2974,53 @@ async def autobot_run_now(user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+@api_router.post("/autobot/telegram/link")
+async def autobot_telegram_link(user: dict = Depends(get_current_user)):
+    """Auto-discover the chat id (from the latest message sent to the bot), save it,
+    and send a confirmation message."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise HTTPException(status_code=400, detail="Token del bot non configurato")
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"https://api.telegram.org/bot{token}/getUpdates")
+            data = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Telegram non raggiungibile: {str(e)[:120]}")
+    chat_id, name = None, None
+    for u in reversed(data.get("result", [])):
+        m = u.get("message") or u.get("channel_post") or u.get("my_chat_member") or {}
+        c = m.get("chat") or {}
+        if c.get("id"):
+            chat_id = c["id"]; name = c.get("first_name") or c.get("title") or c.get("username")
+            break
+    if not chat_id:
+        raise HTTPException(status_code=404,
+                            detail="Nessun messaggio ricevuto. Apri Telegram, scrivi /start al bot @squalo_signals_bot e riprova.")
+    await db.autobot.update_one({"_id": "engine"}, {"$set": {"telegram_chat_id": str(chat_id)}}, upsert=True)
+    await _tg_send(f"✅ <b>Apex Flow collegato</b>\nRiceverai qui ogni apertura, chiusura e time-stop dei trade.")
+    return {"ok": True, "chat_id": str(chat_id), "name": name}
+
+
+@api_router.post("/autobot/telegram/test")
+async def autobot_telegram_test(user: dict = Depends(get_current_user)):
+    if not (os.environ.get("TELEGRAM_BOT_TOKEN") and await _tg_chat_id()):
+        raise HTTPException(status_code=400, detail="Telegram non configurato")
+    await _tg_send("🔔 <b>Messaggio di test</b>\nGli avvisi Apex Flow funzionano correttamente.")
+    return {"ok": True}
+
+
 @api_router.post("/autobot/close/{pid}")
 async def autobot_close(pid: str, user: dict = Depends(get_current_user)):
+    positions = await metaapi_service.get_positions() or []
+    pos = next((p for p in positions if str(p.get("id")) == str(pid)), None)
     r = await metaapi_service.close_position(pid)
     if not r["ok"]:
         raise HTTPException(status_code=400, detail=r.get("error", "Chiusura non riuscita"))
+    if pos:
+        await _autobot_log(f"Chiusura manuale: {pos['symbol']} {pos['side']}")
+        await _notify_trade("close", pos["symbol"], pos["side"], pos.get("volume"), "chiusura manuale")
     return r
 
 
