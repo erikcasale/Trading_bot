@@ -46,7 +46,7 @@ export default function Login() {
             <Activity className="w-6 h-6 text-[#0EA5E9]" />
           </div>
           <div>
-            <h1 className="font-head text-2xl font-extrabold tracking-tight leading-none">Apex Flow</h1>
+            <h1 className="font-head text-2xl font-extrabold tracking-tight leading-none">Trading-bot</h1>
             <span className="overline">Institutional Smart Money Terminal</span>
           </div>
         </div>

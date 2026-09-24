@@ -1,62 +1,40 @@
-# Apex Flow — Installazione sul tuo VPS (indipendenza totale)
+# Trading-bot — Installazione sul tuo VPS (indipendenza totale)
 
 Guida per far girare **tutto** (bot + backend + app PWA) su un tuo server, senza dipendere da Emergent.
 Tutto gira in Docker: backend FastAPI + il bot 24/7 + la PWA React servita con HTTPS automatico.
 
-**Per il test sul conto demo useremo Oracle Cloud "Always Free" (0 €).** Quando passerai al conto vero,
-consiglio di spostarti su **Hetzner CAX11 (~3,79 €/mese)**: basterà rifare `git clone` + `.env` + avvio, il pacchetto è identico.
+**Setup scelto: VPS server.it "Linux 8" (3 core / 8 GB, Intel Xeon x86) + dominio `trading-bot.it` + MongoDB Atlas free.**
+Il VPS x86 è direttamente supportato dalle immagini Docker (nessuna modifica).
 
 ---
 
 ## Cosa ti serve (una volta sola)
 
-1. **Server**:
-   - **Test (gratis)** → **Oracle Cloud Always Free**, istanza ARM Ampere A1 → https://www.oracle.com/cloud/free/
-   - **Produzione (a pagamento, affidabile)** → **Hetzner CAX11** ARM 4 GB, ~3,79 €/mese → https://www.hetzner.com/cloud
-2. **MongoDB Atlas** (gratis, piano M0) → https://www.mongodb.com/cloud/atlas/register
-3. **DuckDNS** (sottodominio gratis per avere HTTPS) → https://www.duckdns.org
+1. **VPS server.it "Linux 8"** (3 core / 8 GB / 80 GB, Ubuntu) → https://www.server.it/it/cloud/vps-linux
+2. **Dominio** `trading-bot.it` (anch'esso su server.it)
+3. **MongoDB Atlas** (gratis, piano M0) → https://www.mongodb.com/cloud/atlas/register
 4. Le tue chiavi **MetaApi** (token + account id) e, se vuoi, il **token del bot Telegram**.
-
-> Nota architettura: le immagini Docker sono multi-arch, quindi funzionano **identiche** sia su ARM (Oracle/Hetzner CAX) sia su x86.
 
 ---
 
-## Passo 1 — Crea il server
+## Passo 1 — Crea il VPS su server.it
+1. Ordina il piano **Linux 8** → scegli **Ubuntu 24.04** come sistema operativo.
+2. Attivazione in ~60 secondi: ricevi via email/pannello l'**IP pubblico** e la **password di root** (o imposti la tua chiave SSH).
+3. Le porte 80/443 su questi VPS sono aperte di default (Ubuntu non ha iptables restrittive come Oracle). Se hai un firewall nel pannello server.it, consenti **22, 80, 443**.
+4. **Annota l'IP pubblico** del VPS.
 
-### Opzione A — Oracle Cloud Always Free (gratis, per il test) ⭐
-1. Registrati su Oracle Cloud (serve una carta per la verifica, ma il tier **Always Free non viene addebitato**).
-2. **Menu → Compute → Instances → Create Instance**.
-3. **Image**: Ubuntu 24.04. **Shape**: cambia in **VM.Standard.A1.Flex** (ARM Always Free) → imposta **2 OCPU / 12 GB** (rientra nel free).
-4. **Networking**: assegna un **IP pubblico**. Aggiungi la tua chiave SSH.
-5. Crea l'istanza e **annota l'IP pubblico**.
-6. **⚠️ APRI LE PORTE (2 livelli — è il punto dove tutti si bloccano):**
-   - **a) Security List del cloud**: Networking → Virtual Cloud Networks → la tua VCN → Security Lists → Default → **Add Ingress Rules**:
-     - Source `0.0.0.0/0`, IP Protocol TCP, Destination Port **80**
-     - Source `0.0.0.0/0`, IP Protocol TCP, Destination Port **443**
-   - **b) Firewall interno dell'istanza** (le immagini Ubuntu di Oracle bloccano tutto tranne SSH). Collegati in SSH e lancia:
-     ```bash
-     sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
-     sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
-     sudo netfilter-persistent save
-     ```
-   Senza ENTRAMBI i passaggi, HTTPS non funziona e la PWA non si installa.
+## Passo 2 — Collega il dominio trading-bot.it
+Nel pannello DNS di **server.it** (Dominio → Gestione DNS) crea due record che puntano all'IP del VPS:
+- Record **A** · nome `@` (o vuoto) · valore = **IP del VPS**
+- Record **A** · nome `www` · valore = **IP del VPS**
+Salva. La propagazione richiede da pochi minuti a qualche ora. Caddy otterrà da solo il certificato HTTPS per `trading-bot.it` e `www.trading-bot.it`.
 
-### Opzione B — Hetzner CAX11 (per la produzione)
-1. Registrati su Hetzner Cloud → **Add Server**.
-2. Immagine: **Ubuntu 24.04**. Tipo: **CAX11** (ARM, 4 GB). Località: Germania/Finlandia.
-3. Aggiungi la tua chiave SSH e crea il server; **annota l'IP pubblico**.
-4. In **Firewall** apri le porte **22, 80, 443** (su Hetzner basta questo, niente iptables interni).
-
-## Passo 2 — DuckDNS (dominio gratis → HTTPS)
-1. Vai su https://www.duckdns.org, accedi con Google/GitHub.
-2. Crea un sottodominio, es. `apexflow` → diventa **`apexflow.duckdns.org`**.
-3. Nel campo **current ip** metti l'**IP del server** del Passo 1 e premi **update ip**.
-
+> In alternativa (se il dominio non è ancora pronto) puoi usare un sottodominio gratuito **DuckDNS** puntato all'IP e mettere quello in `DOMAIN`.
 
 ## Passo 3 — MongoDB Atlas (database gratis)
 1. Registrati su Atlas → crea un cluster **M0 (Free)**.
 2. **Database Access** → crea un utente con password.
-3. **Network Access** → **Add IP Address** → `0.0.0.0/0` (consenti da ovunque).
+3. **Network Access** → **Add IP Address** → metti l'**IP del tuo VPS** (più sicuro di `0.0.0.0/0`).
 4. **Connect → Drivers** → copia la **connection string** (`mongodb+srv://...`).
 
 ## Passo 4 — Installa Docker sul server
@@ -88,8 +66,8 @@ cp deploy/.env.example deploy/.env
 nano deploy/.env
 ```
 Compila:
-- `DOMAIN=apexflow.duckdns.org` (il tuo sottodominio del Passo 2)
-- `MONGO_URL=...` (la stringa di Atlas del Passo 3) e `DB_NAME=apexflow`
+- `DOMAIN=trading-bot.it` (il tuo dominio del Passo 2)
+- `MONGO_URL=...` (la stringa di Atlas del Passo 3) e `DB_NAME=tradingbot`
 - `JWT_SECRET=` (genera con `openssl rand -hex 32`)
 - `METAAPI_TOKEN=` e `METAAPI_ACCOUNT_ID=` (dal tuo MetaApi)
 - `TELEGRAM_BOT_TOKEN=` (facoltativo)
@@ -100,7 +78,7 @@ Salva con `CTRL+O`, `Invio`, esci con `CTRL+X`.
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 La prima build richiede qualche minuto. Al termine:
-- Apri **https://apexflow.duckdns.org** → l'app è online con HTTPS valido.
+- Apri **https://trading-bot.it** → l'app è online con HTTPS valido.
 - Accedi con `demo@apexflow.io` / `apexflow2026` (o "Entra con Account Demo").
 - Sul telefono Android: apri quell'URL in Chrome → **Installa app** (PWA).
 - Nel cockpit premi **Avvia bot**: da qui il bot lavora **24/7 anche a telefono spento**.

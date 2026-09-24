@@ -51,7 +51,7 @@ export default function Header({ botStatus, account, onKill }) {
             <Activity className="w-5 h-5 text-[#0EA5E9]" />
           </div>
           <div className="leading-none">
-            <div className="font-head font-extrabold tracking-tight">Apex Flow</div>
+            <div className="font-head font-extrabold tracking-tight">Trading-bot</div>
             <div className="flex items-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] pulse-dot" />
               <span className="text-[10px] font-mono text-[#64748B]">Claude 4.6 Active</span>

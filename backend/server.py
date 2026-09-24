@@ -2789,7 +2789,7 @@ async def _tg_send(text):
 async def _notify_trade(action, symbol, side, lot, extra=""):
     icon = "🟢" if action == "open" else ("🔴" if action == "close" else "⏱")
     verb = {"open": "APERTO", "close": "CHIUSO", "timestop": "TIME-STOP"}.get(action, action.upper())
-    await _tg_send(f"{icon} <b>{verb}</b>\n{symbol} <b>{side}</b> · {lot} lotti\n{extra}\n<i>Apex Flow · MT5 demo</i>")
+    await _tg_send(f"{icon} <b>{verb}</b>\n{symbol} <b>{side}</b> · {lot} lotti\n{extra}\n<i>Trading-bot · MT5 demo</i>")
 
 
 async def _autobot_log(msg, err=None):
@@ -2952,7 +2952,7 @@ async def autobot_start(user: dict = Depends(get_current_user)):
                                           "next_run": _next_daily_run(datetime.now(timezone.utc)).isoformat()}},
                                 upsert=True)
     await _autobot_log("Bot AVVIATO — valutazione segnali in corso")
-    await _tg_send("🚀 <b>Apex Flow avviato</b>\nCombo D1 · valutazione 1×/giorno · MT5 demo")
+    await _tg_send("🚀 <b>Trading-bot avviato</b>\nCombo D1 · valutazione 1×/giorno · MT5 demo")
     asyncio.create_task(_autobot_cycle("start"))
     return {"running": True}
 
@@ -2961,7 +2961,7 @@ async def autobot_start(user: dict = Depends(get_current_user)):
 async def autobot_stop(user: dict = Depends(get_current_user)):
     await db.autobot.update_one({"_id": "engine"}, {"$set": {"running": False}}, upsert=True)
     await _autobot_log("Bot FERMATO — nessun nuovo ordine (le posizioni aperte restano)")
-    await _tg_send("🛑 <b>Apex Flow fermato</b>\nNessun nuovo ordine (le posizioni aperte restano)")
+    await _tg_send("🛑 <b>Trading-bot fermato</b>\nNessun nuovo ordine (le posizioni aperte restano)")
     return {"running": False}
 
 
@@ -2999,7 +2999,7 @@ async def autobot_telegram_link(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404,
                             detail="Nessun messaggio ricevuto. Apri Telegram, scrivi /start al bot @squalo_signals_bot e riprova.")
     await db.autobot.update_one({"_id": "engine"}, {"$set": {"telegram_chat_id": str(chat_id)}}, upsert=True)
-    await _tg_send(f"✅ <b>Apex Flow collegato</b>\nRiceverai qui ogni apertura, chiusura e time-stop dei trade.")
+    await _tg_send(f"✅ <b>Trading-bot collegato</b>\nRiceverai qui ogni apertura, chiusura e time-stop dei trade.")
     return {"ok": True, "chat_id": str(chat_id), "name": name}
 
 
@@ -3007,7 +3007,7 @@ async def autobot_telegram_link(user: dict = Depends(get_current_user)):
 async def autobot_telegram_test(user: dict = Depends(get_current_user)):
     if not (os.environ.get("TELEGRAM_BOT_TOKEN") and await _tg_chat_id()):
         raise HTTPException(status_code=400, detail="Telegram non configurato")
-    await _tg_send("🔔 <b>Messaggio di test</b>\nGli avvisi Apex Flow funzionano correttamente.")
+    await _tg_send("🔔 <b>Messaggio di test</b>\nGli avvisi Trading-bot funzionano correttamente.")
     return {"ok": True}
 
 

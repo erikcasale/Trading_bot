@@ -1,6 +1,6 @@
 {
-  "short_name": "Apex Flow",
-  "name": "Apex Flow — Auto-Trader MT5",
+  "short_name": "Trading-bot",
+  "name": "Trading-bot — Auto-Trader MT5",
   "description": "Terminale di auto-trading combo D1 su conto Tickmill MT5 demo via MetaApi.",
   "icons": [
     {
