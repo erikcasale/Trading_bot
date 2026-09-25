@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .
-RUN pip install --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ -r requirements.txt
+# emergentintegrations serve solo alla funzione AI (import lazy, non nel cockpit) e
+# crea un conflitto di dipendenze con litellm: la escludiamo dal build del VPS.
+RUN grep -viE '^emergentintegrations' requirements.txt > req.vps.txt \
+    && pip install -r req.vps.txt
 
 COPY backend/ .
 
