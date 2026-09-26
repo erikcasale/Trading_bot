@@ -305,6 +305,14 @@ Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezza
 
 - `deploy/README.md` aggiornato (2026-06) per **Oracle Cloud Always Free** come server di TEST (istanza ARM Ampere A1 VM.Standard.A1.Flex, Ubuntu 24.04) con il doppio-firewall Oracle documentato (Security List cloud + iptables interne su porte 80/443 — il gotcha classico), Docker con aggiunta al gruppo docker (SSH come utente `ubuntu`), e sezione migrazione Oracle→Hetzner CAX11 per il passaggio a conto reale. Immagini Docker multi-arch → funzionano identiche su ARM. DB su Atlas → nessuna perdita dati alla migrazione.
 
+## Deploy PRODUZIONE LIVE — VPS server.it (2026-09/verificato utente)
+- App ONLINE su **https://trading-bot.it** (HTTPS Caddy/Let's Encrypt ok), VPS AlmaLinux, root, Docker Compose in `~/Trading_bot`.
+- Stack compose: `deploy-web-1` (Caddy 80/443) + `deploy-backend-1` (uvicorn:8001) + `deploy-mongo-1` (mongo:7 interno, NO Atlas). Tutti Up.
+- Fix build: `emergentintegrations` escluso dal build VPS via `deploy/backend.Dockerfile` (grep -v > req.vps.txt) per conflitto litellm; AI Smart Money non serve al cockpit (import lazy).
+- `deploy/.env` sul VPS: MONGO_URL=mongodb://mongo:27017, DB_NAME=tradingbot, JWT_SECRET nuovo, ADMIN_* scelti dall'utente, METAAPI_TOKEN/ACCOUNT_ID NUOVI (vecchi ruotati), TELEGRAM_BOT_TOKEN nuovo. `.env.example` repo aggiornato a Mongo interno.
+- VERIFICATO END-TO-END DALL'UTENTE (screenshot cockpit): Auto-Trader ATTIVO, MetaApi Connesso, equity €10.095, 9/10 posizioni aperte, Telegram attivo, "Prossimo ciclo 27/09 00:00" (= 22:00 UTC).
+- Scheduler confermato corretto (`_autobot_loop`/`_next_daily_run`): 1×/giorno a 22:00 UTC = 00:00 ora italiana, solo se bot `running`. La mancata valutazione della notte precedente era dovuta al backend non ancora configurato (`.env` creato solo dopo), non a un bug.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).
