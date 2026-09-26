@@ -2740,6 +2740,7 @@ AUTOBOT_MAX = 10
 AUTOBOT_TSTOP_DAYS = 28          # ~20 D1 trading bars
 AUTOBOT_LOT_PER_10K = 0.1
 AUTOBOT_DAILY_HOUR_UTC = 22       # evaluate once/day, after the forex D1 bar closes
+AUTOBOT_REPORT_HOUR_UTC = 21      # end-of-day Telegram report (21:00 UTC = 23:00 ora IT)
 _autobot_lock = asyncio.Lock()
 
 
@@ -2908,6 +2909,7 @@ async def _autobot_cycle(trigger="scheduled"):
                                                   "last_run": now2.isoformat(),
                                                   "last_run_date": now2.date().isoformat(),
                                                   "next_run": _next_daily_run(now2).isoformat()}}, upsert=True)
+            asyncio.create_task(_record_equity_snapshot())
 
 
 async def _autobot_loop():
@@ -2923,6 +2925,71 @@ async def _autobot_loop():
         except Exception:
             logger.exception("autobot loop tick failed")
         await asyncio.sleep(120)
+
+
+# ---- Daily equity snapshot + end-of-day Telegram report ----
+async def _record_equity_snapshot():
+    """Store one equity snapshot per UTC day (keyed by date) for the history chart."""
+    try:
+        if not await metaapi_service.check_connected():
+            return None
+        acct = await metaapi_service.get_account_info()
+        if not acct or acct.get("equity") is None:
+            return None
+        positions = await metaapi_service.get_positions() or []
+        ours = [p for p in positions if (p.get("comment") or "").startswith("apexflow")]
+        now = datetime.now(timezone.utc)
+        snap = {"_id": now.date().isoformat(), "date": now.date().isoformat(),
+                "ts": now.isoformat(), "balance": acct.get("balance"),
+                "equity": acct.get("equity"), "floating": acct.get("profit"),
+                "currency": acct.get("currency", "EUR"), "open_positions": len(ours)}
+        await db.equity_history.update_one({"_id": snap["_id"]}, {"$set": snap}, upsert=True)
+        return snap
+    except Exception:
+        logger.warning("equity snapshot failed", exc_info=True)
+        return None
+
+
+async def _send_daily_report():
+    """Compose and send the end-of-day summary to Telegram. Returns False if it can't."""
+    snap = await _record_equity_snapshot()
+    if not snap:
+        return False
+    prev = await db.equity_history.find_one({"_id": {"$lt": snap["_id"]}}, sort=[("_id", -1)])
+
+    def m(v):
+        return f"€{float(v or 0):,.2f}"
+
+    floating = snap.get("floating") or 0
+    lines = ["📊 <b>Report giornaliero · Trading-bot</b>",
+             f"Equity: <b>{m(snap['equity'])}</b>",
+             f"Saldo: {m(snap['balance'])}",
+             f"P&L aperto: {'+' if floating >= 0 else ''}{m(floating)}",
+             f"Posizioni aperte: {snap['open_positions']}/{AUTOBOT_MAX}"]
+    if prev and prev.get("equity") is not None and prev.get("date") != snap["date"]:
+        d = snap["equity"] - prev["equity"]
+        pct = (d / prev["equity"] * 100) if prev["equity"] else 0
+        sg = "+" if d >= 0 else ""
+        lines.append(f"Variazione da {prev['date']}: {sg}{m(d)} ({sg}{pct:.2f}%)")
+    lines.append("<i>MT5 demo · Combo D1</i>")
+    await _tg_send("\n".join(lines))
+    return True
+
+
+async def _daily_report_loop():
+    await asyncio.sleep(25)
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            if now.hour >= AUTOBOT_REPORT_HOUR_UTC:
+                doc = await db.autobot.find_one({"_id": "engine"}, {"last_report_date": 1}) or {}
+                if doc.get("last_report_date") != now.date().isoformat():
+                    await db.autobot.update_one({"_id": "engine"},
+                                                {"$set": {"last_report_date": now.date().isoformat()}}, upsert=True)
+                    await _send_daily_report()
+        except Exception:
+            logger.exception("daily report loop failed")
+        await asyncio.sleep(300)
 
 
 @api_router.get("/autobot")
@@ -2971,6 +3038,20 @@ async def autobot_run_now(user: dict = Depends(get_current_user)):
     if not doc.get("running"):
         raise HTTPException(status_code=400, detail="Il bot non è attivo")
     asyncio.create_task(_autobot_cycle("manual"))
+    return {"ok": True}
+
+
+@api_router.get("/autobot/equity-history")
+async def autobot_equity_history(user: dict = Depends(get_current_user)):
+    docs = await db.equity_history.find({}, {"_id": 0}).sort("date", 1).to_list(365)
+    return {"snapshots": docs}
+
+
+@api_router.post("/autobot/report-now")
+async def autobot_report_now(user: dict = Depends(get_current_user)):
+    ok = await _send_daily_report()
+    if not ok:
+        raise HTTPException(status_code=400, detail="Broker non connesso — impossibile generare il report")
     return {"ok": True}
 
 
@@ -3047,6 +3128,7 @@ async def startup():
         import asyncio
         asyncio.create_task(metaapi_service.warm_up())
         asyncio.create_task(_autobot_loop())
+        asyncio.create_task(_daily_report_loop())
     except Exception:
         pass
 

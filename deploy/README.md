@@ -99,9 +99,38 @@ docker compose -f deploy/docker-compose.yml down           # ferma tutto
 ```bash
 ./deploy/update.sh
 ```
-Lo script scarica il codice nuovo, ricostruisce e riavvia. **I dati (Atlas) e le posizioni aperte non si perdono.** Fine.
+Lo script fa **prima un backup del DB**, poi scarica il codice nuovo, ricostruisce, riavvia e verifica che il backend risponda. I dati (MongoDB interno) e le posizioni aperte non si perdono.
+
+> Se in passato avevi modificato a mano `backend/requirements.txt` sul VPS (riga `emergentintegrations`), ripristinalo una volta con `git checkout -- backend/requirements.txt`: ora è il Dockerfile a escluderla in automatico, quindi il `git pull` non darà più conflitti.
 
 > Nota: modifiche a `deploy/.env` (es. cambio dominio o chiavi) richiedono un `docker compose -f deploy/docker-compose.yml up -d --build`.
+
+---
+
+## Backup automatico del database (MongoDB)
+Il MongoDB gira in un container con volume persistente. Per non perdere mai storico trade e configurazioni, c'è uno script di backup con rotazione (tiene gli ultimi 7).
+
+**Backup manuale (una prova):**
+```bash
+bash deploy/backup.sh
+```
+Crea un file compresso in `~/trading-bot-backups/mongo-AAAAMMGG-HHMMSS.archive.gz`.
+
+**Backup automatico ogni giorno alle 03:00** (aggiungi al crontab di root, una volta sola):
+```bash
+( crontab -l 2>/dev/null; echo "0 3 * * * $HOME/Trading_bot/deploy/backup.sh >> $HOME/trading-bot-backups/backup.log 2>&1" ) | crontab -
+crontab -l   # verifica che la riga sia presente
+```
+
+**Ripristino da un backup:**
+```bash
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml exec -T mongo \
+  sh -c 'mongorestore --archive --gzip --drop' < ~/trading-bot-backups/mongo-AAAAMMGG-HHMMSS.archive.gz
+```
+(`--drop` sostituisce i dati attuali con quelli del backup.)
+
+> Personalizza numero di copie o cartella: `KEEP=30 BACKUP_DIR=/mnt/backup bash deploy/backup.sh`.
+
 
 ---
 

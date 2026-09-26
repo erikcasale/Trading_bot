@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square, Loader2, RefreshCw, Bot, Wifi, WifiOff, Clock, TrendingUp, TrendingDown, X, Activity, ChevronDown, AlertTriangle, Layers, ShieldOff, Send } from "lucide-react";
+import { Play, Square, Loader2, RefreshCw, Bot, Wifi, WifiOff, Clock, TrendingUp, TrendingDown, X, Activity, ChevronDown, AlertTriangle, Layers, ShieldOff, Send, BarChart3 } from "lucide-react";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import api from "@/lib/api";
 import { toast } from "sonner";
 
@@ -21,6 +22,7 @@ export default function AutoTrader() {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [history, setHistory] = useState([]);
   const poll = useRef(null);
 
   const load = useCallback(async () => {
@@ -28,6 +30,15 @@ export default function AutoTrader() {
   }, []);
 
   useEffect(() => { load(); poll.current = setInterval(load, 5000); return () => clearInterval(poll.current); }, [load]);
+
+  useEffect(() => {
+    const loadHist = async () => {
+      try { const { data } = await api.get("/autobot/equity-history"); setHistory(data.snapshots || []); } catch { /* keep last */ }
+    };
+    loadHist();
+    const t = setInterval(loadHist, 60000);
+    return () => clearInterval(t);
+  }, []);
 
   const start = async () => {
     if (!window.confirm("Avviare il bot? Invierà ordini REALI sul tuo conto MT5 demo secondo la strategia combo D1 (nessuno stop di prezzo, solo time-stop).")) return;
@@ -58,6 +69,10 @@ export default function AutoTrader() {
   const testTelegram = async () => {
     try { await api.post("/autobot/telegram/test"); toast.success("Messaggio di test inviato su Telegram"); }
     catch (e) { toast.error(e?.response?.data?.detail || "Invio non riuscito"); }
+  };
+  const reportNow = async () => {
+    try { await api.post("/autobot/report-now"); toast.success("Report giornaliero inviato su Telegram"); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Invio report non riuscito"); }
   };
 
   if (!data) return (
@@ -108,7 +123,7 @@ export default function AutoTrader() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {tgBot && !tgOn && (
               <button data-testid="autobot-telegram-link" onClick={linkTelegram} disabled={busy}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-[#0EA5E9]/50 text-[#38BDF8] hover:bg-[#0EA5E9]/10 transition-colors disabled:opacity-50">
@@ -119,6 +134,12 @@ export default function AutoTrader() {
               <button data-testid="autobot-telegram-test" onClick={testTelegram}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-[#0EA5E9]/40 text-[#38BDF8] hover:bg-[#0EA5E9]/10 transition-colors">
                 <Send className="w-3.5 h-3.5" />Test Telegram
+              </button>
+            )}
+            {tgOn && (
+              <button data-testid="autobot-report-now" onClick={reportNow}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg border border-[#10B981]/40 text-[#10B981] hover:bg-[#10B981]/10 transition-colors">
+                <BarChart3 className="w-3.5 h-3.5" />Report ora
               </button>
             )}
             {running && (
@@ -158,6 +179,40 @@ export default function AutoTrader() {
           <div className="mt-3 flex items-start gap-2 text-[11px] text-[#F59E0B] bg-[#F59E0B]/10 border border-[#F59E0B]/40 rounded-lg p-2">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>Broker MetaApi non connesso: impossibile avviare il bot o inviare ordini finché la connessione non è ripristinata.</span>
+          </div>
+        )}
+      </div>
+
+      {/* Equity history */}
+      <div className="rounded-2xl border border-[#1E293B] bg-[#0B0E17] overflow-hidden" data-testid="autobot-equity-chart">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[#1E293B]">
+          <h3 className="font-head font-bold text-sm inline-flex items-center gap-2"><BarChart3 className="w-4 h-4 text-[#10B981]" />Andamento equity</h3>
+          <span className="overline">{history.length} {history.length === 1 ? "giorno" : "giorni"} · 1 snapshot/giorno</span>
+        </div>
+        {history.length < 2 ? (
+          <div className="px-4 py-10 text-center text-[11px] text-[#64748B]" data-testid="autobot-equity-empty">
+            Il grafico si popola con uno snapshot al giorno (registrato la sera e a ogni ciclo del bot). Torna domani per vedere l'andamento, oppure premi “Valuta ora” per registrare subito il primo punto.
+          </div>
+        ) : (
+          <div className="p-3">
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={history} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#10B981" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="#10B981" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" vertical={false} />
+                <XAxis dataKey="date" tick={{ fill: "#64748B", fontSize: 10 }} tickFormatter={(d) => (d || "").slice(5)} axisLine={{ stroke: "#1E293B" }} tickLine={false} minTickGap={24} />
+                <YAxis tick={{ fill: "#64748B", fontSize: 10 }} domain={["auto", "auto"]} tickFormatter={(v) => `€${Math.round(v).toLocaleString("en-US")}`} axisLine={false} tickLine={false} width={64} />
+                <Tooltip
+                  contentStyle={{ background: "#0F141C", border: "1px solid #1E293B", borderRadius: 12, fontSize: 12 }}
+                  labelStyle={{ color: "#94A3B8" }}
+                  formatter={(v) => [money(v, cur), "Equity"]} />
+                <Area type="monotone" dataKey="equity" stroke="#10B981" strokeWidth={2} fill="url(#eqGrad)" dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
         )}
       </div>

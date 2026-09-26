@@ -313,6 +313,14 @@ Nota: le candele D1 Tickmill aprono all'orario server broker (~22:00 UTC = mezza
 - VERIFICATO END-TO-END DALL'UTENTE (screenshot cockpit): Auto-Trader ATTIVO, MetaApi Connesso, equity €10.095, 9/10 posizioni aperte, Telegram attivo, "Prossimo ciclo 27/09 00:00" (= 22:00 UTC).
 - Scheduler confermato corretto (`_autobot_loop`/`_next_daily_run`): 1×/giorno a 22:00 UTC = 00:00 ora italiana, solo se bot `running`. La mancata valutazione della notte precedente era dovuta al backend non ancora configurato (`.env` creato solo dopo), non a un bug.
 
+## Feature: Report giornaliero Telegram + Grafico equity + Backup + update.sh robusto (2026-09-26)
+- **Report giornaliero Telegram** alle 21:00 UTC (23:00 IT): equity, saldo, P&L aperto, n° posizioni, variazione vs snapshot precedente. `_daily_report_loop` (tick 5min, 1×/giorno via `last_report_date`). Costante `AUTOBOT_REPORT_HOUR_UTC=21`.
+- **Snapshot equity giornaliero** in `db.equity_history` (1 doc/giorno, `_id`=data): registrato dal report loop e alla fine di ogni ciclo autobot (`_record_equity_snapshot`).
+- Endpoint: `GET /api/autobot/equity-history` (ultimi 365 snapshot), `POST /api/autobot/report-now` (invio report manuale/test).
+- **Frontend** (`AutoTrader.jsx`): card "Andamento equity" con AreaChart recharts (empty-state se <2 punti), pulsante "Report ora" (data-testid `autobot-report-now`, `autobot-equity-chart`, `autobot-equity-empty`). Fix flex-wrap sulla barra pulsanti (no overflow mobile a 390px).
+- **Deploy**: `deploy/backup.sh` (mongodump --archive --gzip, rotazione ultimi 7, cron 03:00), `deploy/update.sh` riscritto (backup→pull ff-only→rebuild→health-check backend con curl→prune, messaggi d'errore chiari). README aggiornato (sezione backup/restore/cron; nota `git checkout -- backend/requirements.txt` per evitare conflitti dal vecchio sed).
+- Verificato in preview: curl login+equity-history+report-now (dati reali, Telegram ok), screenshot cockpit mobile ok. Attivazione in PRODUZIONE richiede redeploy sul VPS.
+
 ## Backlog / prossimi step
 - P1: Rolling walk-forward su più finestre annuali (non solo ultimo anno) per stimare stabilità nel tempo.
 - P1: Esecuzione live guidata su Tickmill demo dalla strategia appresa (con conferma + kill switch).
