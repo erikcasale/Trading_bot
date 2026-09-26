@@ -10,7 +10,7 @@ COPY backend/requirements.txt .
 # emergentintegrations serve solo alla funzione AI (import lazy, non nel cockpit) e
 # crea un conflitto di dipendenze con litellm: la escludiamo dal build del VPS.
 RUN grep -viE '^emergentintegrations' requirements.txt > req.vps.txt \
-    && pip install -r req.vps.txt
+    && pip install --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ -r req.vps.txt
 
 COPY backend/ .
 
